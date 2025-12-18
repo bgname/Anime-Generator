@@ -1,0 +1,5 @@
+{
+  "name": "剧本可视化工具",
+  "description": "一款基于 AI 的工具，可将剧本转换为结构化分镜、角色设定和视觉资产。",
+  "requestFramePermissions": []
+}
