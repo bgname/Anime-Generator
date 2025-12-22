@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => {
       },
       build: {
         // 指定输出目录为绝对路径
-        outDir: '/var/www/html/shop.ubanquan.cn/dist',
+        outDir: '/var/www/html/anime.ubanquan.cn/dist',
         // 允许清空位于项目根目录之外的输出目录
         emptyOutDir: true
       }
