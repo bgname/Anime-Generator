@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Character, Scene } from '../types';
 import { Wand2, Image as ImageIcon, RefreshCw, Loader2, Plus, Trash2 } from 'lucide-react';
@@ -31,7 +32,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
 
   // Helper to safely access properties
   const roleOrLocation = type === 'character' ? (entity as Character).role : (entity as Scene).location;
-  const roleLabel = type === 'character' ? '角色定位' : '地点';
+  const roleLabel = type === 'character' ? '角色定位' : '场景定位';
   
   const images = entity.images || [];
 
@@ -82,11 +83,11 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                    <p className="text-slate-500 text-sm">正在绘制三视图...</p>
                 </div>
              ) : (
-                <div className="grid grid-cols-1 gap-4 h-full">
+                <div className="grid grid-cols-1 gap-4 h-full min-h-[300px] md:min-h-0">
                    {labels.map((label, idx) => {
                       const imgUrl = images[idx];
                       return (
-                        <div key={idx} className="flex-1 bg-white rounded-lg border border-slate-200 p-2 flex flex-col relative group">
+                        <div key={idx} className="flex-1 bg-white rounded-lg border border-slate-200 p-2 flex flex-col relative group min-h-[120px] md:min-h-0">
                            <div className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wider">{label}</div>
                            <div className="flex-1 bg-slate-50 rounded border border-slate-100 flex items-center justify-center overflow-hidden relative">
                               {imgUrl ? (
@@ -125,7 +126,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
       return (
         <div className="flex flex-col h-full">
             {/* Main Image Display */}
-            <div className="flex-1 relative group bg-slate-50 overflow-hidden flex items-center justify-center">
+            <div className="flex-1 relative group bg-slate-50 overflow-hidden flex items-center justify-center min-h-[250px] md:min-h-0">
                 {currentImage ? (
                     <img 
                       src={currentImage} 
@@ -185,7 +186,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
 
             {/* Thumbnails Strip */}
             {images.length > 0 && (
-                <div className="h-24 bg-white border-t border-slate-200 p-3 overflow-x-auto whitespace-nowrap flex gap-2 items-center">
+                <div className="h-24 bg-white border-t border-slate-200 p-3 overflow-x-auto whitespace-nowrap flex gap-2 items-center flex-shrink-0">
                     {images.map((img, idx) => (
                         <button
                             key={idx}
@@ -209,15 +210,15 @@ export const EntityCard: React.FC<EntityCardProps> = ({
   };
 
   return (
-    <div className="w-full h-full flex flex-row">
+    <div className="w-full h-full flex flex-col md:flex-row">
       {/* Left Column: Image Area */}
-      <div className="w-1/3 lg:w-2/5 flex flex-col border-r border-slate-200 flex-shrink-0 bg-slate-100">
+      <div className="w-full md:w-1/3 lg:w-2/5 h-64 md:h-full flex flex-col border-b md:border-b-0 md:border-r border-slate-200 flex-shrink-0 bg-slate-100">
          {type === 'character' ? renderCharacterVisuals() : renderSceneVisuals()}
       </div>
 
       {/* Right Column: Content Form */}
-      <div className="w-2/3 lg:w-3/5 flex flex-col h-full bg-white">
-        <div className="flex-1 overflow-y-auto p-6 lg:p-8 space-y-6">
+      <div className="w-full md:w-2/3 lg:w-3/5 flex flex-col h-full bg-white flex-1 overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6">
           {/* Name Input */}
           <div>
             <label className="block text-xs lg:text-sm font-semibold text-slate-500 uppercase tracking-wider mb-2">名称</label>
@@ -269,7 +270,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
         </div>
 
         {/* Visual Prompt Section (Fixed Bottom Area) */}
-        <div className="p-6 lg:p-8 pt-4 border-t border-slate-100 bg-white z-10">
+        <div className="p-4 md:p-6 lg:p-8 pt-4 border-t border-slate-100 bg-white z-10 flex-shrink-0">
            <div className="flex justify-between items-center mb-3">
               <div className="flex items-center gap-3">
                   <label className="text-xs lg:text-sm font-semibold text-indigo-600 uppercase tracking-wider flex items-center gap-2">
@@ -293,7 +294,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
             value={entity.visualPrompt}
             onChange={(e) => onUpdate(entity.id, 'visualPrompt', e.target.value)}
             placeholder="点击上方按钮生成详细的 AI 绘画提示词，或手动输入..."
-            className="w-full h-32 lg:h-40 text-xs lg:text-sm font-mono text-slate-600 border rounded-lg border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none bg-slate-50 p-4 resize-none transition-all"
+            className="w-full h-24 md:h-32 lg:h-40 text-xs lg:text-sm font-mono text-slate-600 border rounded-lg border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none bg-slate-50 p-4 resize-none transition-all"
           />
         </div>
       </div>

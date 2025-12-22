@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { AlertCircle, HelpCircle, Layers } from 'lucide-react';
 
@@ -91,7 +92,7 @@ export const CustomDialog: React.FC<CustomDialogProps> = ({
                         }}
                         className={`flex-1 px-4 py-2.5 rounded-lg font-medium text-white transition-colors shadow-sm ${type === 'alert' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-red-600 hover:bg-red-700'}`}
                     >
-                        {type === 'alert' ? '知道了' : '确认删除'}
+                        {type === 'alert' ? '知道了' : (confirmText || '确认删除')}
                     </button>
                 </div>
             )}

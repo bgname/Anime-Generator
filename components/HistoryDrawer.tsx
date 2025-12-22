@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { GenerationHistoryItem } from '../types';
-import { X, Download, Clock, Image as ImageIcon, Check, FolderOpen } from 'lucide-react';
+import { X, Download, Clock, Image as ImageIcon, Check, FolderOpen, Trash2 } from 'lucide-react';
 import { downloadHistoryItem } from '../utils/zipUtils';
 import { saveToWorkspace } from '../services/fileService';
 
@@ -10,9 +10,18 @@ interface HistoryDrawerProps {
   onClose: () => void;
   history: GenerationHistoryItem[];
   workspaceHandle?: any;
+  onDelete: (id: string) => void;
+  onPreviewImage: (url: string) => void;
 }
 
-export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose, history, workspaceHandle }) => {
+export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ 
+  isOpen, 
+  onClose, 
+  history, 
+  workspaceHandle,
+  onDelete,
+  onPreviewImage
+}) => {
   const [savingId, setSavingId] = useState<string | null>(null);
 
   const handleSave = async (item: GenerationHistoryItem) => {
@@ -83,19 +92,35 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose, h
                     history.slice().reverse().map((item) => (
                         <div key={item.id} className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden group hover:shadow-md transition-shadow">
                             <div className="p-3 bg-slate-50 border-b border-slate-100 flex justify-between items-start">
-                                <div>
+                                <div className="flex-1 mr-2">
                                     <h4 className="font-bold text-slate-700 text-sm">{item.name}</h4>
                                     <span className="text-xs text-slate-400 font-mono">{formatDate(item.timestamp)}</span>
                                 </div>
-                                <span className={`text-[10px] px-1.5 py-0.5 rounded border ${item.type === 'character' ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-emerald-50 border-emerald-100 text-emerald-600'}`}>
-                                    {item.type === 'character' ? '角色' : '场景'}
-                                </span>
+                                <div className="flex items-center gap-2">
+                                     <span className={`text-[10px] px-1.5 py-0.5 rounded border ${item.type === 'character' ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-emerald-50 border-emerald-100 text-emerald-600'}`}>
+                                        {item.type === 'character' ? '角色' : '场景'}
+                                    </span>
+                                    <button 
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onDelete(item.id);
+                                        }}
+                                        className="p-1 hover:bg-red-100 text-slate-400 hover:text-red-500 rounded transition-colors"
+                                        title="删除记录"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                </div>
                             </div>
                             
                             {/* Images Preview */}
                             <div className="p-3 grid grid-cols-3 gap-2">
                                 {item.images.slice(0, 3).map((img, idx) => (
-                                    <div key={idx} className="aspect-square bg-slate-100 rounded overflow-hidden border border-slate-200">
+                                    <div 
+                                      key={idx} 
+                                      className="aspect-square bg-slate-100 rounded overflow-hidden border border-slate-200 cursor-pointer hover:opacity-80 transition-opacity"
+                                      onClick={() => img && onPreviewImage(img)}
+                                    >
                                         {img ? (
                                             <img src={img} className="w-full h-full object-cover" alt="gen" />
                                         ) : (

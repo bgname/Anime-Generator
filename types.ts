@@ -51,6 +51,7 @@ export interface GenerationHistoryItem {
 }
 
 export interface ProjectState {
+  projectName?: string; // Added project name
   step: number;
   script: string;
   style: OverallStyle;

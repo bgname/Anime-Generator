@@ -1,5 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
+// @ts-ignore
+import mammoth from 'mammoth';
 import { 
   ProjectState, 
   AppStep, 
@@ -15,6 +17,15 @@ import {
   generateCharacterViews,
   uploadFileToCoze
 } from './services/geminiService';
+import { 
+  createNewProject, 
+  openExistingProject, 
+  saveProjectState, 
+  loadProjectState, 
+  saveEntityAsset, 
+  saveEntityProfile 
+} from './services/fileService';
+import { exportProjectToPPT } from './services/pptService';
 import { StepIndicator } from './components/StepIndicator';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { EntityCard } from './components/EntityCard';
@@ -22,16 +33,17 @@ import { CustomDialog } from './components/CustomDialog';
 import { SettingsModal } from './components/SettingsModal';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
+import { ProjectManager } from './components/ProjectManager';
 import { 
   FileText, Wand2, ArrowRight, Layout, MapPin, Users, Palette, Loader2,
   Plus, Trash2, GripVertical, Play, Pause, Settings, History, Upload, Image as ImageIcon,
-  ArrowLeft, RotateCcw, AlertCircle
+  ArrowLeft, RotateCcw, AlertCircle, LogOut, Folder, AlertTriangle, FileUp, Presentation
 } from 'lucide-react';
 
-const LOCAL_STORAGE_KEY = 'script_visualizer_project_state';
 const savedKey = localStorage.getItem('coze_api_key') || '';
 
 const INITIAL_STATE: ProjectState = {
+  projectName: '',
   step: AppStep.INPUT_SCRIPT,
   script: '',
   style: { name: '', content: '', paintingStyle: '' },
@@ -42,31 +54,22 @@ const INITIAL_STATE: ProjectState = {
   history: [],
 };
 
-const getSavedState = (): ProjectState => {
-  try {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      return {
-        ...parsed,
-        isAnalyzing: false,
-        cozeApiKey: localStorage.getItem('coze_api_key') || parsed.cozeApiKey || '',
-      };
-    }
-  } catch (e) {
-    console.error("Failed to load state from localStorage", e);
-  }
-  return INITIAL_STATE;
-};
-
 function App() {
-  const [state, setState] = useState<ProjectState>(getSavedState());
+  // If workspaceHandle is null, we show ProjectManager
+  const [state, setState] = useState<ProjectState>(INITIAL_STATE);
   const [activeTab, setActiveTab] = useState<'characters' | 'scenes'>('characters');
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+
+  // Loading state for project operations
+  const [isProjectLoading, setIsProjectLoading] = useState(false);
+  const [isExportingPPT, setIsExportingPPT] = useState(false);
+  
+  // Drag and Drop State
+  const [isDragging, setIsDragging] = useState(false);
 
   const [dialogConfig, setDialogConfig] = useState<{
     isOpen: boolean;
@@ -91,33 +94,137 @@ function App() {
   const isBulkGeneratingRef = useRef(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scriptFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Persistence Effect
+  // --- Persistence & Auto-Save ---
+
+  // 1. Save API Key to localStorage only
   useEffect(() => {
-    const { isAnalyzing, workspaceHandle, ...stateToSave } = state;
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(stateToSave));
     localStorage.setItem('coze_api_key', state.cozeApiKey);
-  }, [state]);
+  }, [state.cozeApiKey]);
 
-  const handleSelectWorkspace = async () => {
+  // 2. Auto-save Project State to File System
+  // Debounce saving to avoid excessive file writes
+  useEffect(() => {
+    if (!state.workspaceHandle) return;
+
+    const timer = setTimeout(() => {
+      saveProjectState(state.workspaceHandle, state);
+    }, 1000); // Save after 1 second of inactivity
+
+    return () => clearTimeout(timer);
+  }, [
+    state.script, 
+    state.style, 
+    state.characters, 
+    state.scenes, 
+    state.step,
+    state.history,
+    state.workspaceHandle
+  ]);
+
+  // --- Project Management Handlers ---
+
+  const handleCreateProject = async (name: string) => {
+    setIsProjectLoading(true);
     try {
-        // @ts-ignore - Browsers might not have this typed yet
-        const handle = await window.showDirectoryPicker();
-        setState(prev => ({ ...prev, workspaceHandle: handle }));
+      const handle = await createNewProject(name);
+      if (handle) {
+        // Reset state but keep API key
+        setState({
+          ...INITIAL_STATE,
+          projectName: name,
+          cozeApiKey: state.cozeApiKey, // Keep existing key
+          workspaceHandle: handle
+        });
+        
+        // Only warn once if virtual
+        // @ts-ignore
+        if (handle.__virtual) {
+            showAlert("注意：当前环境不支持本地文件访问（如 iframe 中运行）。项目将运行在“临时模式”下，数据不会保存到本地硬盘。请在独立窗口或本地浏览器中运行以获得完整功能。");
+        } else {
+             // Initial save
+            await saveProjectState(handle, { ...INITIAL_STATE, projectName: name });
+        }
+      }
     } catch (e) {
-        console.warn("Workspace selection cancelled or not supported");
+      console.error("Create project failed", e);
+      showAlert("创建项目失败，请重试。");
+    } finally {
+      setIsProjectLoading(false);
     }
   };
 
-  const handleImportConfig = (config: Partial<ProjectState>) => {
-    setState(prev => ({
-        ...prev,
-        ...config,
-        step: config.step ?? prev.step,
-        isAnalyzing: false,
-        workspaceHandle: prev.workspaceHandle // Maintain current workspace handle
-    }));
-    setIsSettingsOpen(false);
+  const handleOpenProject = async () => {
+    setIsProjectLoading(true);
+    try {
+      const handle = await openExistingProject();
+      if (handle) {
+        const loadedData = await loadProjectState(handle);
+        if (loadedData) {
+            setState(prev => ({
+                ...prev,
+                ...loadedData,
+                workspaceHandle: handle,
+                cozeApiKey: prev.cozeApiKey, // Prefer local key or handle key? Let's keep local key for auth
+                isAnalyzing: false
+            }));
+            // If project loaded has no projectName, use folder name
+            if (!loadedData.projectName) {
+                setState(prev => ({ ...prev, projectName: handle.name }));
+            }
+        } else {
+            // New folder opened or invalid JSON, initialize as empty project in this folder
+            setState(prev => ({
+                ...INITIAL_STATE,
+                projectName: handle.name,
+                cozeApiKey: prev.cozeApiKey,
+                workspaceHandle: handle
+            }));
+        }
+      }
+    } catch (e) {
+      console.error("Open project failed", e);
+      // Alert already shown in service for known errors, but fallback here
+      if ((e as Error).name !== 'AbortError' && (e as Error).name !== 'SecurityError') {
+         showAlert("无法打开该文件夹或读取项目配置。");
+      }
+    } finally {
+      setIsProjectLoading(false);
+    }
+  };
+
+  const handleCloseProject = () => {
+    const isVirtual = state.workspaceHandle?.__virtual;
+    const msg = isVirtual 
+        ? "确定要关闭临时项目吗？所有数据将会丢失（临时模式不保存数据）。" 
+        : "确定要关闭当前项目吗？未保存的更改可能会丢失（通常会自动保存）。";
+    
+    showConfirm(msg, () => {
+        setState(prev => ({
+            ...INITIAL_STATE,
+            cozeApiKey: prev.cozeApiKey // Preserve key
+        }));
+    }, "确认退出");
+  };
+
+  // --- Main App Logic ---
+
+  const handleExportPPT = async () => {
+    if (state.characters.length === 0 && state.scenes.length === 0) {
+        showAlert("项目中没有任何角色或场景数据，无法导出。");
+        return;
+    }
+
+    setIsExportingPPT(true);
+    try {
+        await exportProjectToPPT(state);
+    } catch (e) {
+        console.error("Export PPT failed", e);
+        showAlert("导出 PPT 失败，请检查数据完整性或稍后重试。");
+    } finally {
+        setIsExportingPPT(false);
+    }
   };
 
   const showAlert = (message: string) => {
@@ -129,11 +236,12 @@ function App() {
     });
   };
 
-  const showConfirm = (message: string, onConfirm: () => void) => {
+  const showConfirm = (message: string, onConfirm: () => void, confirmText?: string) => {
     setDialogConfig({
       isOpen: true,
       type: 'confirm',
       message,
+      confirmText,
       onConfirm: () => {
         onConfirm();
         setDialogConfig(prev => ({ ...prev, isOpen: false }));
@@ -184,6 +292,86 @@ function App() {
       ...prev,
       history: [...prev.history, historyItem]
     }));
+  };
+
+  const handleDeleteHistory = (id: string) => {
+    showConfirm("确定要删除这条历史记录吗？", () => {
+        setState(prev => ({
+            ...prev,
+            history: prev.history.filter(h => h.id !== id)
+        }));
+    });
+  };
+
+  // --- File Parsing Logic ---
+
+  const processScriptFile = async (file: File) => {
+    setState(prev => ({ ...prev, isAnalyzing: true }));
+    try {
+        let text = '';
+        if (file.name.match(/\.docx$/i)) {
+            const arrayBuffer = await file.arrayBuffer();
+            const result = await mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+            text = result.value;
+        } else if (file.name.match(/\.(txt|md)$/i)) {
+            text = await file.text();
+        } else if (file.name.match(/\.doc$/i)) {
+             showAlert("不支持旧版 .doc 格式。请在 Word 中将其另存为 .docx 格式后上传。");
+             setState(prev => ({ ...prev, isAnalyzing: false }));
+             return;
+        } else {
+             showAlert("不支持的文件格式。请上传 .docx, .txt 或 .md 文件。");
+             setState(prev => ({ ...prev, isAnalyzing: false }));
+             return;
+        }
+
+        if (text) {
+             setState(prev => ({ ...prev, script: text, isAnalyzing: false }));
+        } else {
+             showAlert("无法从文件中提取文本，文件可能为空或格式损坏。");
+             setState(prev => ({ ...prev, isAnalyzing: false }));
+        }
+    } catch (err) {
+        console.error("File parse error", err);
+        showAlert("读取文件失败，请重试。");
+        setState(prev => ({ ...prev, isAnalyzing: false }));
+    } finally {
+         // Reset file input if used
+         if (scriptFileInputRef.current) {
+            scriptFileInputRef.current.value = '';
+        }
+    }
+  };
+
+  const handleScriptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+        processScriptFile(file);
+    }
+  };
+
+  // Drag and Drop Handlers
+  const handleFileDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+        processScriptFile(files[0]);
+    }
   };
 
   const handleAnalyzeStyle = async () => {
@@ -342,7 +530,7 @@ function App() {
     e.dataTransfer.setData("text/plain", index.toString());
   };
 
-  const handleDragOver = (e: React.DragEvent, index: number) => {
+  const handleListDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     if (draggedIndex === null || draggedIndex === index) return;
 
@@ -392,6 +580,13 @@ function App() {
          state.cozeApiKey
        );
        updateEntity(type, id, 'visualPrompt', prompt);
+       
+       // Save profile text
+       if (state.workspaceHandle) {
+          const content = `【名称】\n${entity.name}\n\n【定位/地点】\n${additionalInfo.role}\n\n【特征】\n${entity.traits}\n\n【提示词】\n${prompt}`;
+          saveEntityProfile(state.workspaceHandle, type, entity.name, id, content);
+       }
+
     } catch (e) {
       console.error("Prompt gen failed", e);
       showAlert("生成提示词失败，请重试。");
@@ -419,7 +614,7 @@ function App() {
         setEntityLoading(type, id, 'isGeneratingPrompt', true);
 
         try {
-            let additionalInfo = {};
+            let additionalInfo: any = {};
             if (type === 'character') {
                 const c = candidate as Character;
                 additionalInfo = { role: c.role, setting: c.setting };
@@ -448,6 +643,12 @@ function App() {
                    [listKey]: updatedList
                };
             });
+            
+             // Save profile text
+            if (stateRef.current.workspaceHandle) {
+                const content = `【名称】\n${candidate.name}\n\n【定位/地点】\n${additionalInfo.role}\n\n【特征】\n${candidate.traits}\n\n【提示词】\n${prompt}`;
+                await saveEntityProfile(stateRef.current.workspaceHandle, type, candidate.name, id, content);
+            }
 
         } catch (e) {
             console.error(`Failed to generate prompt for ${id}`, e);
@@ -498,6 +699,18 @@ function App() {
                 });
                 return { ...prev, characters: updatedList };
             });
+
+            // Save Character Images
+            if (state.workspaceHandle) {
+                const labels = ['正视图', '侧视图', '背视图'];
+                for (let i = 0; i < generatedImages.length; i++) {
+                    const img = generatedImages[i];
+                    if (img) {
+                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `${labels[i]}.png`, img);
+                    }
+                }
+            }
+
        } else {
             const newImages = await generateVisualAsset(entity.visualPrompt, state.style, state.cozeApiKey);
             generatedImages = newImages;
@@ -515,6 +728,17 @@ function App() {
                 });
                 return { ...prev, scenes: updatedList };
             });
+
+            // Save Scene Images
+            if (state.workspaceHandle) {
+                const startIdx = (entity.images || []).length;
+                for (let i = 0; i < newImages.length; i++) {
+                     const img = newImages[i];
+                     if(img) {
+                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `image_${startIdx + i + 1}.png`, img);
+                     }
+                }
+            }
        }
 
        addToHistory(type, entity, generatedImages);
@@ -557,21 +781,60 @@ function App() {
   };
 
   const renderInputStep = () => (
-    <div className="max-w-4xl mx-auto p-6 h-full flex flex-col justify-center">
-       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
-         <div className="flex items-center gap-3 mb-6">
-           <div className="p-3 bg-indigo-100 rounded-lg text-indigo-600">
-             <FileText className="w-8 h-8" />
+    <div className="max-w-4xl mx-auto p-4 md:p-6 min-h-full flex flex-col justify-center">
+       <div 
+         className={`bg-white rounded-xl shadow-sm border p-6 md:p-8 my-4 transition-all relative ${
+            isDragging 
+              ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' 
+              : 'border-slate-200'
+         }`}
+         onDragOver={handleFileDragOver}
+         onDragLeave={handleDragLeave}
+         onDrop={handleDrop}
+       >
+         {/* Drag Overlay */}
+         {isDragging && (
+           <div className="absolute inset-0 bg-indigo-50/90 backdrop-blur-sm z-10 rounded-xl flex flex-col items-center justify-center border-2 border-dashed border-indigo-400">
+             <FileUp className="w-16 h-16 text-indigo-500 mb-4 animate-bounce" />
+             <p className="text-xl font-bold text-indigo-700">释放鼠标以导入剧本</p>
+             <p className="text-indigo-500 mt-2">支持 .docx, .txt, .md</p>
            </div>
+         )}
+
+         <div className="flex items-center justify-between mb-6">
+           <div className="flex items-center gap-3">
+             <div className="p-3 bg-indigo-100 rounded-lg text-indigo-600">
+               <FileText className="w-8 h-8" />
+             </div>
+             <div>
+               <h2 className="text-xl md:text-2xl font-bold text-slate-900">导入剧本</h2>
+               <p className="text-sm md:text-base text-slate-500">
+                 粘贴文本或拖拽文档 (docx/txt) 到此处
+               </p>
+             </div>
+           </div>
+           
            <div>
-             <h2 className="text-2xl font-bold text-slate-900">导入剧本</h2>
-             <p className="text-slate-500">请在下方粘贴您的剧本或故事文本以开始分析。</p>
+               <button 
+                  onClick={() => scriptFileInputRef.current?.click()}
+                  className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-300 hover:border-indigo-300 text-slate-600 hover:text-indigo-600 rounded-lg text-sm font-medium transition-all shadow-sm"
+               >
+                  <FileUp className="w-4 h-4" />
+                  导入文档
+               </button>
+               <input 
+                 type="file" 
+                 ref={scriptFileInputRef} 
+                 className="hidden" 
+                 accept=".docx,.txt,.md" 
+                 onChange={handleScriptUpload}
+               />
            </div>
          </div>
          
          <textarea
-           className="w-full h-80 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none font-mono text-sm leading-relaxed"
-           placeholder="内景 宇宙飞船 - 白天..."
+           className="w-full h-60 md:h-80 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none font-mono text-sm leading-relaxed"
+           placeholder="内景 宇宙飞船 - 白天... (或直接拖拽文件到此处)"
            value={state.script}
            onChange={(e) => setState(s => ({ ...s, script: e.target.value }))}
          />
@@ -594,15 +857,15 @@ function App() {
     const isStyleConfigured = state.style.paintingStyle.trim() !== '' || !!state.style.referenceImageId;
 
     return (
-      <div className="max-w-4xl mx-auto p-6 h-full flex flex-col justify-center">
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
+      <div className="max-w-4xl mx-auto p-4 md:p-6 min-h-full flex flex-col justify-center">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 my-4">
           <div className="mb-6">
-            <h2 className="text-2xl font-bold text-slate-900 mb-2">整体设定</h2>
-            <p className="text-slate-500">确认整体视觉风格，该设定将用于生成后续角色和场景。</p>
+            <h2 className="text-xl md:text-2xl font-bold text-slate-900 mb-2">整体设定</h2>
+            <p className="text-sm md:text-base text-slate-500">确认整体视觉风格，该设定将用于生成后续角色和场景。</p>
           </div>
 
           <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-2">风格名称</label>
                     <input
@@ -650,10 +913,10 @@ function App() {
                       <span className="text-xs text-slate-400 italic">* 上传后将替代“画风”文本描述生效</span>
                   </div>
                   
-                  <div className="flex items-center gap-4">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                       <button 
                           onClick={() => fileInputRef.current?.click()}
-                          className={`flex items-center gap-2 px-4 py-3 rounded-lg border-2 border-dashed transition-all ${
+                          className={`flex items-center gap-2 px-4 py-3 rounded-lg border-2 border-dashed transition-all w-full sm:w-auto justify-center ${
                               state.style.referenceImageId 
                               ? 'border-indigo-200 bg-indigo-50/50 text-indigo-600' 
                               : 'border-slate-300 hover:border-indigo-400 hover:bg-white text-slate-500'
@@ -730,8 +993,9 @@ function App() {
      const currentItem = list[currentIndex];
 
      return (
-       <div className="flex h-[calc(100vh-100px)] bg-slate-100 border-t border-slate-200">
-          <div className="w-80 bg-white flex flex-col border-r border-slate-200 flex-shrink-0">
+       <div className="flex flex-col md:flex-row h-[calc(100vh-100px)] bg-slate-100 border-t border-slate-200">
+          {/* Sidebar */}
+          <div className="w-full md:w-80 h-48 md:h-full bg-white flex flex-col border-b md:border-b-0 md:border-r border-slate-200 flex-shrink-0">
              <div className="p-4 border-b border-slate-100">
                <div className="flex items-center justify-between mb-4">
                     <button 
@@ -794,7 +1058,7 @@ function App() {
                         key={item.id} 
                         draggable
                         onDragStart={(e) => handleDragStart(e, index)}
-                        onDragOver={(e) => handleDragOver(e, index)}
+                        onDragOver={(e) => handleListDragOver(e, index)}
                         className={`group relative ${draggedIndex === index ? 'opacity-50' : ''}`}
                       >
                          <div
@@ -868,8 +1132,9 @@ function App() {
              </div>
           </div>
 
-          <div className="flex-1 overflow-hidden p-4 sm:p-6 flex flex-col items-center bg-slate-100">
-            <div className="w-full h-full shadow-lg rounded-xl overflow-hidden bg-white flex border border-slate-200 max-w-[95%] xl:max-w-7xl">
+          {/* Main Content Area */}
+          <div className="flex-1 overflow-hidden p-2 sm:p-4 md:p-6 flex flex-col items-center bg-slate-100">
+            <div className="w-full h-full shadow-lg rounded-xl overflow-hidden bg-white flex flex-col md:flex-row border border-slate-200 max-w-full md:max-w-[95%] xl:max-w-7xl">
               {currentItem ? (
                  <EntityCard 
                     key={currentItem.id}
@@ -893,9 +1158,61 @@ function App() {
      );
   };
 
+  // --- Render Flow ---
+  
+  if (!state.workspaceHandle) {
+    return (
+      <ProjectManager 
+        onCreate={handleCreateProject} 
+        onOpen={handleOpenProject} 
+        isLoading={isProjectLoading}
+      />
+    );
+  }
+
+  // Check if virtual
+  // @ts-ignore
+  const isVirtual = state.workspaceHandle?.__virtual;
+
   return (
     <div className="h-screen bg-slate-50 flex flex-col font-sans overflow-hidden">
       <div className="absolute top-4 right-6 z-20 flex items-center gap-3">
+         {/* Virtual Mode Warning */}
+         {isVirtual && (
+             <div className="hidden md:flex items-center gap-2 bg-amber-100 px-3 py-1.5 rounded-full border border-amber-200 text-xs text-amber-700 mr-2 shadow-sm animate-pulse">
+                 <AlertTriangle className="w-3 h-3" />
+                 <span>临时模式</span>
+             </div>
+         )}
+         
+         <div className="hidden md:flex items-center gap-2 bg-white/50 px-3 py-1.5 rounded-full border border-slate-200 text-xs text-slate-500 mr-2 backdrop-blur-sm">
+             <Folder className="w-3 h-3" />
+             <span className="max-w-[150px] truncate">{state.projectName || state.workspaceHandle.name}</span>
+         </div>
+
+         <button
+            onClick={handleCloseProject}
+            className="p-2 rounded-full bg-white text-slate-500 hover:text-red-600 border border-slate-200 hover:border-red-200 shadow-sm transition-all"
+            title="关闭项目"
+         >
+            <LogOut className="w-5 h-5" />
+         </button>
+
+         <div className="w-px h-6 bg-slate-300 mx-1"></div>
+
+         <button
+            onClick={handleExportPPT}
+            disabled={isExportingPPT}
+            className="p-2 rounded-full bg-white text-slate-500 hover:text-emerald-600 border border-slate-200 hover:border-emerald-200 shadow-sm transition-all relative"
+            title="导出 PPT"
+         >
+            {isExportingPPT ? (
+               <Loader2 className="w-5 h-5 animate-spin text-emerald-500" />
+            ) : (
+               <Presentation className="w-5 h-5" />
+            )}
+         </button>
+
          <button
             onClick={() => setIsHistoryOpen(true)}
             className="p-2 rounded-full bg-white text-slate-500 hover:text-indigo-600 border border-slate-200 hover:border-indigo-200 shadow-sm transition-all"
@@ -919,7 +1236,7 @@ function App() {
 
       <StepIndicator currentStep={state.step} />
       
-      <div className="flex-1 overflow-hidden relative">
+      <div className={`flex-1 relative ${state.step === AppStep.CHARACTERS_SCENES ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {state.step === AppStep.INPUT_SCRIPT && renderInputStep()}
         {state.step === AppStep.OVERALL_STYLE && renderStyleStep()}
         {state.step === AppStep.CHARACTERS_SCENES && renderCharactersScenesStep()}
@@ -940,10 +1257,6 @@ function App() {
           onClose={() => setIsSettingsOpen(false)}
           apiKey={state.cozeApiKey}
           onApiKeyChange={(key) => setState(prev => ({...prev, cozeApiKey: key}))}
-          workspaceName={state.workspaceHandle?.name}
-          onSelectWorkspace={handleSelectWorkspace}
-          projectState={state}
-          onImportConfig={handleImportConfig}
         />
         
         <HistoryDrawer 
@@ -951,6 +1264,8 @@ function App() {
            onClose={() => setIsHistoryOpen(false)}
            history={state.history}
            workspaceHandle={state.workspaceHandle}
+           onDelete={handleDeleteHistory}
+           onPreviewImage={setPreviewImageUrl}
         />
 
         <ImagePreviewModal 
@@ -960,7 +1275,13 @@ function App() {
         />
       </div>
 
-      {state.isAnalyzing && <LoadingOverlay message={state.step === AppStep.INPUT_SCRIPT ? "正在分析视觉风格..." : "正在处理中..."} />}
+      {(state.isAnalyzing || isExportingPPT) && (
+        <LoadingOverlay message={
+            isExportingPPT 
+            ? "正在生成 PPT 文件，请稍候..." 
+            : (state.step === AppStep.INPUT_SCRIPT ? "正在分析视觉风格..." : "正在处理中...")
+        } />
+      )}
     </div>
   );
 }
