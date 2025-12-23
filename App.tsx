@@ -54,7 +54,7 @@ const INITIAL_STATE: ProjectState = {
   history: [],
 };
 
-function App() {
+export default function App() {
   // If workspaceHandle is null, we show ProjectManager
   const [state, setState] = useState<ProjectState>(INITIAL_STATE);
   const [activeTab, setActiveTab] = useState<'characters' | 'scenes'>('characters');
@@ -672,7 +672,7 @@ function App() {
       }
   };
 
-  const handleGenerateImage = async (type: 'character' | 'scene', id: string) => {
+  const handleGenerateImage = async (type: 'character' | 'scene', id: string, model?: string) => {
      setEntityLoading(type, id, 'isGeneratingImage', true);
 
      const entity = type === 'character' ? state.characters.find(c => c.id === id) : state.scenes.find(s => s.id === id);
@@ -684,14 +684,21 @@ function App() {
      try {
        let generatedImages: string[] = [];
        if (type === 'character') {
-            generatedImages = await generateCharacterViews(entity.visualPrompt, state.style, state.script, state.cozeApiKey);
+            generatedImages = await generateCharacterViews(
+                entity.visualPrompt, 
+                state.style, 
+                state.script, 
+                state.cozeApiKey,
+                model
+            );
             setState(prev => {
                 const list = prev.characters;
                 const updatedList = list.map(item => {
                     if (item.id === id) {
                         return {
                             ...item,
-                            images: generatedImages,
+                            // Append new image to existing array (Gallery style)
+                            images: [...(item.images || []), ...generatedImages],
                             isGeneratingImage: false
                         };
                     }
@@ -702,17 +709,17 @@ function App() {
 
             // Save Character Images
             if (state.workspaceHandle) {
-                const labels = ['正视图', '侧视图', '背视图'];
+                const startIdx = (entity.images || []).length;
                 for (let i = 0; i < generatedImages.length; i++) {
                     const img = generatedImages[i];
                     if (img) {
-                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `${labels[i]}.png`, img);
+                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `image_${startIdx + i + 1}.png`, img);
                     }
                 }
             }
 
        } else {
-            const newImages = await generateVisualAsset(entity.visualPrompt, state.style, state.cozeApiKey);
+            const newImages = await generateVisualAsset(entity.visualPrompt, state.style, state.cozeApiKey, model);
             generatedImages = newImages;
             setState(prev => {
                 const list = prev.scenes;
@@ -1142,7 +1149,7 @@ function App() {
                     entity={currentItem}
                     onUpdate={(id, field, value) => updateEntity(activeTab === 'characters' ? 'character' : 'scene', id, field, value)}
                     onGeneratePrompt={(id) => generateEntityPrompt(activeTab === 'characters' ? 'character' : 'scene', id)}
-                    onGenerateImage={(id) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id)}
+                    onGenerateImage={(id, model) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id, model)}
                     onShowDialog={showConfirm}
                     onPreviewImage={(url) => setPreviewImageUrl(url)}
                   />
@@ -1285,5 +1292,3 @@ function App() {
     </div>
   );
 }
-
-export default App;

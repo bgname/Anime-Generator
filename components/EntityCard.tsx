@@ -8,7 +8,7 @@ interface EntityCardProps {
   type: 'character' | 'scene';
   onUpdate: (id: string, field: string, value: any) => void;
   onGeneratePrompt: (id: string) => void;
-  onGenerateImage: (id: string) => void;
+  onGenerateImage: (id: string, model?: string) => void;
   onShowDialog: (message: string, onConfirm: () => void) => void;
   onPreviewImage: (url: string) => void;
 }
@@ -22,12 +22,15 @@ export const EntityCard: React.FC<EntityCardProps> = ({
   onShowDialog,
   onPreviewImage
 }) => {
-  // For scenes, we use the gallery logic
+  // For scenes and characters (unified), we use the gallery logic
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [model, setModel] = useState('Doubao-Seedream-4.0');
 
   // Reset selected image when entity changes
   useEffect(() => {
     setSelectedImageIndex(0);
+    // Reset model to default when entity changes
+    setModel('Doubao-Seedream-4.0');
   }, [entity.id]);
 
   // Helper to safely access properties
@@ -39,92 +42,22 @@ export const EntityCard: React.FC<EntityCardProps> = ({
   const handleDeleteImage = (index: number) => {
       onShowDialog("确定删除这张图片吗？", () => {
           const newImages = images.filter((_, i) => i !== index);
-          
-          if (type === 'character') {
-             // For character, we replace with empty string to maintain slot structure if needed
-             const updated = [...images];
-             updated[index] = ""; 
-             onUpdate(entity.id, 'images', updated);
-          } else {
-             onUpdate(entity.id, 'images', newImages);
-             if (selectedImageIndex >= newImages.length) {
-                setSelectedImageIndex(Math.max(0, newImages.length - 1));
-             }
+          onUpdate(entity.id, 'images', newImages);
+          if (selectedImageIndex >= newImages.length) {
+            setSelectedImageIndex(Math.max(0, newImages.length - 1));
           }
       });
   };
 
-
-  const renderCharacterVisuals = () => {
-     // Expect images[0]=Front, images[1]=Side, images[2]=Back
-     const labels = ['正视图', '侧视图', '背视图'];
-     
-     return (
-        <div className="flex flex-col h-full bg-slate-100">
-           {/* Header */}
-           <div className="p-4 border-b border-slate-200 bg-white flex justify-between items-center">
-              <span className="font-bold text-slate-700">角色三视图</span>
-              {entity.visualPrompt && !entity.isGeneratingImage && (
-                 <button 
-                    onClick={() => onGenerateImage(entity.id)}
-                    className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-full transition-colors"
-                 >
-                    <Wand2 className="w-3 h-3" />
-                    生成图片
-                 </button>
-              )}
-           </div>
-           
-           {/* Grid */}
-           <div className="flex-1 p-4 overflow-y-auto">
-             {entity.isGeneratingImage ? (
-                <div className="h-full flex flex-col items-center justify-center space-y-3">
-                   <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
-                   <p className="text-slate-500 text-sm">正在绘制三视图...</p>
-                </div>
-             ) : (
-                <div className="grid grid-cols-1 gap-4 h-full min-h-[300px] md:min-h-0">
-                   {labels.map((label, idx) => {
-                      const imgUrl = images[idx];
-                      return (
-                        <div key={idx} className="flex-1 bg-white rounded-lg border border-slate-200 p-2 flex flex-col relative group min-h-[120px] md:min-h-0">
-                           <div className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wider">{label}</div>
-                           <div className="flex-1 bg-slate-50 rounded border border-slate-100 flex items-center justify-center overflow-hidden relative">
-                              {imgUrl ? (
-                                 <img 
-                                    src={imgUrl} 
-                                    className="w-full h-full object-contain cursor-pointer transition-transform hover:scale-[1.02]" 
-                                    alt={label} 
-                                    onClick={() => onPreviewImage(imgUrl)}
-                                 />
-                              ) : (
-                                 <ImageIcon className="w-8 h-8 text-slate-300 opacity-50" />
-                              )}
-                           </div>
-                           
-                           {/* Delete specific view */}
-                           {imgUrl && (
-                                <button 
-                                    onClick={(e) => { e.stopPropagation(); handleDeleteImage(idx); }}
-                                    className="absolute top-2 right-2 p-1.5 bg-white/90 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-md shadow-sm transition-all opacity-0 group-hover:opacity-100"
-                                >
-                                    <Trash2 className="w-3 h-3" />
-                                </button>
-                           )}
-                        </div>
-                      );
-                   })}
-                </div>
-             )}
-           </div>
-        </div>
-     );
-  };
-
-  const renderSceneVisuals = () => {
+  const renderVisuals = () => {
       const currentImage = images[selectedImageIndex];
       return (
         <div className="flex flex-col h-full">
+            {/* Header (Visual) */}
+            <div className="p-3 border-b border-slate-200 bg-white flex justify-between items-center md:hidden">
+              <span className="font-bold text-slate-700">{type === 'character' ? '角色设计' : '场景设计'}</span>
+            </div>
+
             {/* Main Image Display */}
             <div className="flex-1 relative group bg-slate-50 overflow-hidden flex items-center justify-center min-h-[250px] md:min-h-0">
                 {currentImage ? (
@@ -139,7 +72,9 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                         {entity.isGeneratingImage ? (
                             <div className="flex flex-col items-center animate-pulse">
                                 <RefreshCw className="h-8 w-8 animate-spin mb-2 text-indigo-500" />
-                                <span className="text-sm font-medium text-indigo-600">生成中...</span>
+                                <span className="text-sm font-medium text-indigo-600">
+                                    {type === 'character' ? '绘制角色中...' : '绘制场景中...'}
+                                </span>
                             </div>
                         ) : (
                             <>
@@ -165,7 +100,10 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                 <div className="absolute bottom-6 left-0 right-0 px-6 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10">
                     {entity.visualPrompt && !entity.isGeneratingImage && (
                         <button 
-                            onClick={(e) => { e.stopPropagation(); onGenerateImage(entity.id); }}
+                            onClick={(e) => { 
+                                e.stopPropagation(); 
+                                onGenerateImage(entity.id, model); 
+                            }}
                             className="bg-white/90 backdrop-blur-sm text-indigo-600 py-2.5 px-6 rounded-xl shadow-lg text-sm font-bold flex items-center justify-center gap-2 hover:bg-white border border-indigo-100 transition-all hover:scale-105"
                         >
                             {images.length > 0 ? (
@@ -193,7 +131,13 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                             onClick={() => setSelectedImageIndex(idx)}
                             className={`relative w-16 h-16 rounded-md overflow-hidden flex-shrink-0 border-2 transition-all ${selectedImageIndex === idx ? 'border-indigo-600 ring-2 ring-indigo-100' : 'border-slate-200 hover:border-indigo-300'}`}
                         >
-                            <img src={img} className="w-full h-full object-cover" />
+                            {img ? (
+                                <img src={img} className="w-full h-full object-cover" alt="thumbnail" />
+                            ) : (
+                                <div className="w-full h-full bg-slate-100 flex items-center justify-center">
+                                    <ImageIcon className="w-4 h-4 text-slate-300 opacity-50" />
+                                </div>
+                            )}
                         </button>
                     ))}
                     
@@ -213,7 +157,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
     <div className="w-full h-full flex flex-col md:flex-row">
       {/* Left Column: Image Area */}
       <div className="w-full md:w-1/3 lg:w-2/5 h-64 md:h-full flex flex-col border-b md:border-b-0 md:border-r border-slate-200 flex-shrink-0 bg-slate-100">
-         {type === 'character' ? renderCharacterVisuals() : renderSceneVisuals()}
+         {renderVisuals()}
       </div>
 
       {/* Right Column: Content Form */}
@@ -276,6 +220,16 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                   <label className="text-xs lg:text-sm font-semibold text-indigo-600 uppercase tracking-wider flex items-center gap-2">
                     视觉提示词
                   </label>
+                  <div className="flex items-center gap-1.5 ml-2">
+                        <select 
+                            value={model} 
+                            onChange={(e) => setModel(e.target.value)}
+                            className="text-xs border border-indigo-100 bg-indigo-50 text-indigo-700 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer font-medium hover:bg-indigo-100 transition-colors"
+                        >
+                            <option value="Doubao-Seedream-4.0">Doubao-Seedream-4.0</option>
+                            <option value="Doubao-Seedream-3.0">Doubao-Seedream-3.0</option>
+                        </select>
+                  </div>
               </div>
               <button 
                 onClick={() => onGeneratePrompt(entity.id)}

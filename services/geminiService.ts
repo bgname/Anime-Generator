@@ -1,3 +1,4 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { Character, Scene, OverallStyle } from "../types";
 
@@ -8,10 +9,12 @@ const getAiClient = () => {
 // Coze API Configuration
 const COZE_WORKFLOW_ID_STYLE = '7582884589447151643';
 const COZE_WORKFLOW_ID_ENTITIES = '7582889307032272930';
-const COZE_WORKFLOW_ID_CHARACTER_PROMPT = '7582907524878483502';
+const COZE_WORKFLOW_ID_CHARACTER_PROMPT = '7586528499697451062';
 const COZE_WORKFLOW_ID_SCENE_PROMPT = '7584007850298228799';
-const COZE_WORKFLOW_ID_CHARACTER_IMAGE_GEN = '7582907754404020264';
-const COZE_WORKFLOW_ID_SCENE_IMAGE_GEN = '7584255531637194788';
+// Updated Character Image Workflow ID
+const COZE_WORKFLOW_ID_CHARACTER_IMAGE_GEN = '7586599921504010283';
+// Updated Scene Image Workflow ID to be the same as Character as requested
+const COZE_WORKFLOW_ID_SCENE_IMAGE_GEN = '7586599921504010283';
 
 export const uploadFileToCoze = async (file: File, apiKey: string): Promise<{ id: string, name: string }> => {
   const formData = new FormData();
@@ -260,8 +263,11 @@ export const generateDetailedPrompt = async (
         const result = await runCozeWorkflow(COZE_WORKFLOW_ID_CHARACTER_PROMPT, parameters, apiKey);
         try {
             const parsed = JSON.parse(result);
-            if (parsed.role_prompty) {
-                let inner = parsed.role_prompty;
+            // Check for role_promty (based on user feedback) or role_prompty (potential variations)
+            const promptContent = parsed.role_promty || parsed.role_prompty || parsed.role_prompt;
+            
+            if (promptContent) {
+                let inner = promptContent;
                 if (typeof inner === 'string') {
                     if (inner.startsWith('```json')) {
                         inner = inner.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -306,42 +312,59 @@ export const generateDetailedPrompt = async (
 export const generateVisualAsset = async (
   visualPrompt: string,
   style: OverallStyle,
-  apiKey: string
+  apiKey: string,
+  model: string = 'Doubao-Seedream-4.0'
 ): Promise<string[]> => {
   const parameters: Record<string, any> = {
-    desc: visualPrompt
+    prompt: visualPrompt,
+    model: model,
+    width: 2560,
+    height: 1440
   };
-
-  if (style.referenceImageId) {
-    parameters.reference_images = [JSON.stringify({ file_id: style.referenceImageId })];
-  }
 
   try {
     const result = await runCozeWorkflow(COZE_WORKFLOW_ID_SCENE_IMAGE_GEN, parameters, apiKey);
-    const parsed = JSON.parse(result);
     
-    // Attempt to extract scenes_img_list
-    if (parsed.scenes_img_list && Array.isArray(parsed.scenes_img_list)) {
-      return parsed.scenes_img_list;
-    }
-
-    // Fallback logic for other fields
-    const imageUrl = parsed.image || parsed.url || parsed.image_url || parsed.output;
-    if (imageUrl && typeof imageUrl === 'string') {
-      return [imageUrl];
+    let parsed: any;
+    try {
+        parsed = JSON.parse(result);
+    } catch(e) {
+         if (result.startsWith('http')) return [result.trim()];
+         throw new Error("Failed to parse Coze response");
     }
     
-    // If output is stringified JSON
-    if (typeof parsed.output === 'string') {
-        try {
-            const inner = JSON.parse(parsed.output);
-            if (inner.scenes_img_list && Array.isArray(inner.scenes_img_list)) return inner.scenes_img_list;
-            const innerUrl = inner.image || inner.url || inner.image_url || inner;
-            if (typeof innerUrl === 'string') return [innerUrl];
-        } catch (e) {}
+    // 1. Handle "output" field (similar to character gen now)
+    if (parsed.output) {
+        // New format: output is Array ["url"]
+        if (Array.isArray(parsed.output)) {
+            return parsed.output.map((i: any) => String(i));
+        }
+        
+        // Nested JSON string in output?
+        if (typeof parsed.output === 'string') {
+             // Check if it looks like JSON
+             if (parsed.output.trim().startsWith('{') || parsed.output.trim().startsWith('[')) {
+                 try {
+                     const inner = JSON.parse(parsed.output);
+                     if (Array.isArray(inner)) return inner;
+                     if (inner.output && Array.isArray(inner.output)) return inner.output; // nested output array
+                 } catch(e) {}
+             }
+             // It might be just a url
+             if (parsed.output.startsWith('http')) return [parsed.output];
+        }
     }
 
-    return imageUrl ? [String(imageUrl)] : [result];
+    // Fallbacks
+    const fallbackUrl = parsed.image_url || parsed.url || parsed.image;
+    if (fallbackUrl) return [fallbackUrl];
+
+    if (parsed.data && Array.isArray(parsed.data)) {
+        return parsed.data.map((d: any) => d.url || d);
+    }
+    
+    throw new Error("Could not parse image URL from response: " + JSON.stringify(parsed));
+
   } catch (error) {
     console.error("Coze Scene Image Gen Error", error);
     throw error;
@@ -352,25 +375,63 @@ export const generateCharacterViews = async (
   visualPrompt: string,
   style: OverallStyle,
   script: string,
-  apiKey: string
+  apiKey: string,
+  model: string = 'Doubao-Seedream-4.0'
 ): Promise<string[]> => {
-    const styleStr = `风格名称: ${style.name}\n画画风: ${style.paintingStyle}\n详细描述: ${style.content}`;
+    // New Parameters for Doubao-Seedream model
     const parameters = {
-        role_prompt: visualPrompt,
-        style: styleStr,
-        script: script
+        prompt: visualPrompt,
+        model: model,
+        width: 1920,
+        height: 1080
     };
-    const result = await runCozeWorkflow(COZE_WORKFLOW_ID_CHARACTER_IMAGE_GEN, parameters, apiKey);
+
     try {
-        const parsedOuter = JSON.parse(result);
-        const outputStr = parsedOuter.output;
-        if (!outputStr) throw new Error("No 'output' field in Coze response");
-        const views = JSON.parse(outputStr);
-        const front = views['正视图'] || '';
-        const side = views['侧视图'] || '';
-        const back = views['背视图'] || '';
-        return [front, side, back];
+        const result = await runCozeWorkflow(COZE_WORKFLOW_ID_CHARACTER_IMAGE_GEN, parameters, apiKey);
+        
+        let parsed: any;
+        try {
+            parsed = JSON.parse(result);
+        } catch(e) {
+             if (result.startsWith('http')) return [result.trim()];
+             throw new Error("Failed to parse Coze response");
+        }
+        
+        // 1. Handle "output" field
+        if (parsed.output) {
+            // New format: output is Array ["url"]
+            if (Array.isArray(parsed.output)) {
+                return parsed.output.map((i: any) => String(i));
+            }
+            
+            // Nested JSON string in output?
+            if (typeof parsed.output === 'string') {
+                 // Check if it looks like JSON
+                 if (parsed.output.trim().startsWith('{') || parsed.output.trim().startsWith('[')) {
+                     try {
+                         const inner = JSON.parse(parsed.output);
+                         if (Array.isArray(inner)) return inner;
+                         if (inner.output && Array.isArray(inner.output)) return inner.output; // nested output array
+                         // Support for legacy nested formats if needed
+                     } catch(e) {}
+                 }
+                 // It might be just a url
+                 if (parsed.output.startsWith('http')) return [parsed.output];
+            }
+        }
+        
+        // 2. Fallback: Handle common Coze keys directly
+        const fallbackUrl = parsed.image_url || parsed.url || parsed.image;
+        if (fallbackUrl) return [fallbackUrl];
+
+        if (parsed.data && Array.isArray(parsed.data)) {
+            return parsed.data.map((d: any) => d.url || d);
+        }
+
+        throw new Error("Could not parse image URL from response: " + JSON.stringify(parsed));
+
     } catch (e) {
-        throw new Error("Failed to parse image URLs from Coze response");
+        console.error("Character Gen Error", e);
+        throw new Error("Failed to generate character image");
     }
 };
