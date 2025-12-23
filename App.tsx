@@ -387,7 +387,12 @@ export default function App() {
       const style = await analyzeScriptStyle(state.script, state.cozeApiKey);
       setState(prev => ({
         ...prev,
-        style: { ...style, paintingStyle: prev.style.paintingStyle || '' }, 
+        style: { 
+            ...prev.style, 
+            ...style, 
+            // Correctly prioritize the AI result, but fall back to existing if empty
+            paintingStyle: style.paintingStyle || prev.style.paintingStyle || '' 
+        }, 
         step: AppStep.OVERALL_STYLE,
         isAnalyzing: false
       }));

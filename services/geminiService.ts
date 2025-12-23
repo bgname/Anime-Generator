@@ -108,54 +108,127 @@ async function runCozeWorkflow(workflowId: string, parameters: Record<string, an
   return contentJsonString;
 }
 
+// Helper: Deep recursively find a key in an object
+function deepFind(obj: any, keys: string[]): any {
+    if (!obj || typeof obj !== 'object') return undefined;
+    
+    // Check current level
+    for (const k of Object.keys(obj)) {
+        if (keys.includes(k) || keys.includes(k.toLowerCase())) {
+            return obj[k];
+        }
+    }
+    
+    // Recursive search
+    for (const k of Object.keys(obj)) {
+        if (typeof obj[k] === 'object') {
+            const found = deepFind(obj[k], keys);
+            if (found !== undefined) return found;
+        }
+        // Handle cases where nested JSON is stringified
+        if (typeof obj[k] === 'string' && (obj[k].trim().startsWith('{') || obj[k].trim().startsWith('['))) {
+            try {
+                const parsed = JSON.parse(obj[k]);
+                const found = deepFind(parsed, keys);
+                if (found !== undefined) return found;
+            } catch(e) {}
+        }
+    }
+    return undefined;
+}
+
 export const analyzeScriptStyle = async (script: string, apiKey: string): Promise<OverallStyle> => {
   try {
     const contentJsonString = await runCozeWorkflow(COZE_WORKFLOW_ID_STYLE, { script }, apiKey);
 
-    let name = "自定义风格";
+    let name = "";
     let content = "";
+    let paintingStyle = "";
 
     try {
         const parsedOuter = JSON.parse(contentJsonString);
-
-        if (parsedOuter && parsedOuter.style) {
-            let styleData = parsedOuter.style;
-            if (typeof styleData === 'string') {
-                try {
-                     if (styleData.trim().startsWith('{')) {
-                        const parsedInner = JSON.parse(styleData);
-                        styleData = parsedInner;
-                     }
-                } catch (e) { }
-            }
-
-            if (typeof styleData === 'object' && styleData !== null) {
-                if (styleData['风格名称']) {
-                    name = styleData['风格名称'];
-                }
-                if (styleData['风格内容']) {
-                    const c = styleData['风格内容'];
-                    content = Array.isArray(c) ? c.join('\n') : String(c);
-                }
-            } 
-            else if (typeof styleData === 'string') {
-                const nameMatch = styleData.match(/\*\*风格名称\*\*[:：]\s*(.+?)(\n|$)/);
-                if (nameMatch) name = nameMatch[1].trim();
-
-                const contentMatch = styleData.match(/\*\*风格内容\*\*([\s\S]*)/);
-                content = contentMatch ? contentMatch[1].trim() : styleData;
-            }
-        } else {
-            content = typeof parsedOuter === 'object' ? JSON.stringify(parsedOuter, null, 2) : String(parsedOuter);
+        
+        // 1. Try Deep Search first (handles nested objects and stringified JSON properties automatically)
+        name = deepFind(parsedOuter, ['风格名称', 'name', 'style_name']) || "";
+        paintingStyle = deepFind(parsedOuter, ['视觉画风', '画风', 'painting_style', 'visual_style', '画面风格']) || "";
+        
+        const rawContent = deepFind(parsedOuter, ['风格内容', 'content', 'style_content']);
+        if (rawContent) {
+            content = Array.isArray(rawContent) ? rawContent.join('\n') : String(rawContent);
         }
+
+        // 2. Fallback: Regex extraction from raw strings 
+        // We use the raw Coze response string to catch patterns even if JSON parsing failed slightly
+        if (!paintingStyle) {
+            // Regex for JSON pattern: "视觉画风": "..."
+            const jsonRegex = /"(?:视觉画风|画风|painting_style|visual_style)"\s*:\s*"([^"]+)"/;
+            const jsonMatch = contentJsonString.match(jsonRegex);
+            if (jsonMatch) {
+                paintingStyle = jsonMatch[1];
+            } else {
+                // Regex for Markdown/Text pattern: **视觉画风**: ...
+                const textRegex = /(?:^|\n|[*#-]\s*)(?:\*\*)?(?:视觉画风|画风|画面风格|美术风格)(?:\*\*)?[:：]\s*(.+?)(?:\n|$)/;
+                const textMatch = contentJsonString.match(textRegex);
+                if (textMatch) {
+                    paintingStyle = textMatch[1].trim();
+                }
+            }
+            // Decode unicode escape sequences if caught by regex from raw string (e.g. \u56fd)
+            if (paintingStyle && paintingStyle.includes('\\u')) {
+                try {
+                    paintingStyle = JSON.parse(`"${paintingStyle}"`);
+                } catch(e) {}
+            }
+        }
+
+        if (!name) {
+             const jsonRegex = /"(?:风格名称|name|style_name)"\s*:\s*"([^"]+)"/;
+             const m = contentJsonString.match(jsonRegex);
+             if (m) name = m[1];
+             else {
+                 const textRegex = /(?:^|\n|[*#-]\s*)(?:\*\*)?风格名称(?:\*\*)?[:：]\s*(.+?)(?:\n|$)/;
+                 const tm = contentJsonString.match(textRegex);
+                 if (tm) name = tm[1].trim();
+             }
+        }
+
+        if (!content) {
+             const jsonRegex = /"(?:风格内容|content|style_content)"\s*:\s*"([^"]+)"/;
+             const m = contentJsonString.match(jsonRegex);
+             if (m) content = m[1];
+             else {
+                 const textRegex = /(?:^|\n|[*#-]\s*)(?:\*\*)?风格内容(?:\*\*)?[:：]\s*([\s\S]+?)(?:\n(?=[*#-])|$)/;
+                 const tm = contentJsonString.match(textRegex);
+                 if (tm) content = tm[1].trim();
+             }
+        }
+
+        // If content is still empty but we have a parsed object, allow dumping the object (excluding known keys)
+        if (!content && typeof parsedOuter === 'object') {
+             // Basic check if it's the specific style object
+             const targetObj = parsedOuter.style ? (typeof parsedOuter.style === 'string' ? JSON.parse(parsedOuter.style) : parsedOuter.style) : parsedOuter;
+             
+             const displayObj = { ...targetObj };
+             delete displayObj['风格名称'];
+             delete displayObj['视觉画风'];
+             delete displayObj['画风'];
+             delete displayObj['_rawString'];
+             content = JSON.stringify(displayObj, null, 2);
+        }
+
     } catch (e) {
         console.warn("Parsing style failed, using raw string", e);
         content = contentJsonString;
     }
 
     if (!content) content = "暂无风格描述";
+    if (!name) name = "自定义风格";
 
-    return { name, content, paintingStyle: '' };
+    // Final cleanup of unicode escapes if they persisted
+    if (paintingStyle.includes('\\u')) { try { paintingStyle = JSON.parse(`"${paintingStyle}"`); } catch(e){} }
+    if (name.includes('\\u')) { try { name = JSON.parse(`"${name}"`); } catch(e){} }
+
+    return { name, content, paintingStyle: paintingStyle };
 
   } catch (error) {
     console.error("Coze Analysis Error", error);
@@ -315,11 +388,18 @@ export const generateVisualAsset = async (
   apiKey: string,
   model: string = 'Doubao-Seedream-4.0'
 ): Promise<string[]> => {
+  // Adjust dimensions based on model version
+  // Model 3.0 has max resolution limits (approx 2k), so we reduce to 2048x1152 for 16:9
+  // Model 4.0 supports higher resolution 2560x1440
+  const isV3 = model.includes('3.0');
+  const width = isV3 ? 2048 : 2560;
+  const height = isV3 ? 1152 : 1440;
+
   const parameters: Record<string, any> = {
     prompt: visualPrompt,
     model: model,
-    width: 2560,
-    height: 1440
+    width: width,
+    height: height
   };
 
   try {
@@ -382,8 +462,8 @@ export const generateCharacterViews = async (
     const parameters = {
         prompt: visualPrompt,
         model: model,
-        width: 1920,
-        height: 1080
+        width: 2048,
+        height: 2048
     };
 
     try {
