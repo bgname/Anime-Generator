@@ -7,15 +7,22 @@ import {
   AppStep, 
   Character, 
   Scene,
+  Shot,
   GenerationHistoryItem 
 } from './types';
 import { 
   analyzeScriptStyle, 
-  extractEntities, 
+  extractGlobalCharactersFromScript,
+  extractGlobalScenesFromScript,
   generateDetailedPrompt, 
   generateVisualAsset,
   generateCharacterViews,
-  uploadFileToCoze
+  uploadFileToCoze,
+  uploadImageFromUrl,
+  splitScriptToEpisodes,
+  extractEpisodeEntities,
+  extractEpisodeScenes,
+  extractEpisodeStoryboard
 } from './services/geminiService';
 import { 
   createNewProject, 
@@ -34,10 +41,12 @@ import { SettingsModal } from './components/SettingsModal';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
 import { ProjectManager } from './components/ProjectManager';
+import { StoryboardView } from './components/StoryboardView';
 import { 
   FileText, Wand2, ArrowRight, Layout, MapPin, Users, Palette, Loader2,
   Plus, Trash2, GripVertical, Play, Pause, Settings, History, Upload, Image as ImageIcon,
-  ArrowLeft, RotateCcw, AlertCircle, LogOut, Folder, AlertTriangle, FileUp, Presentation
+  ArrowLeft, RotateCcw, AlertCircle, LogOut, Folder, AlertTriangle, FileUp, Presentation,
+  Layers, Film, List
 } from 'lucide-react';
 
 const savedKey = localStorage.getItem('coze_api_key') || '';
@@ -49,9 +58,13 @@ const INITIAL_STATE: ProjectState = {
   style: { name: '', content: '', paintingStyle: '' },
   characters: [],
   scenes: [],
+  shots: [],
   isAnalyzing: false,
+  isExtractingGlobal: false,
   cozeApiKey: savedKey,
   history: [],
+  episodeStatus: {},
+  storyboardStatus: {}
 };
 
 export default function App() {
@@ -59,6 +72,9 @@ export default function App() {
   const [state, setState] = useState<ProjectState>(INITIAL_STATE);
   const [activeTab, setActiveTab] = useState<'characters' | 'scenes'>('characters');
   const [currentIndex, setCurrentIndex] = useState(0);
+  
+  // Episode Filter State: 'all' means "Global/Overall" (no episode ID), number means specific episode
+  const [selectedEpisode, setSelectedEpisode] = useState<number | 'all'>('all');
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -67,6 +83,7 @@ export default function App() {
   // Loading state for project operations
   const [isProjectLoading, setIsProjectLoading] = useState(false);
   const [isExportingPPT, setIsExportingPPT] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>('');
   
   // Drag and Drop State
   const [isDragging, setIsDragging] = useState(false);
@@ -118,9 +135,13 @@ export default function App() {
     state.style, 
     state.characters, 
     state.scenes, 
+    state.shots,
     state.step,
     state.history,
-    state.workspaceHandle
+    state.workspaceHandle,
+    state.episodeCount,
+    state.episodeStatus,
+    state.storyboardStatus
   ]);
 
   // --- Project Management Handlers ---
@@ -272,18 +293,18 @@ export default function App() {
   };
 
   const addToHistory = (
-    type: 'character' | 'scene',
-    entity: Character | Scene,
+    type: 'character' | 'scene' | 'shot',
+    entity: Character | Scene | Shot,
     images: string[]
   ) => {
     const historyItem: GenerationHistoryItem = {
       id: `hist-${Date.now()}`,
       timestamp: Date.now(),
-      type,
-      name: entity.name,
-      roleOrLocation: type === 'character' ? (entity as Character).role : (entity as Scene).location,
-      description: type === 'character' ? (entity as Character).setting : '',
-      traits: entity.traits,
+      type: type as any,
+      name: (entity as any).name || `Shot ${(entity as Shot).shotNumber}`,
+      roleOrLocation: type === 'character' ? (entity as Character).role : (type === 'scene' ? (entity as Scene).location : ''),
+      description: type === 'character' ? (entity as Character).setting : (type === 'shot' ? (entity as Shot).description : ''),
+      traits: (entity as any).traits || '',
       prompt: entity.visualPrompt,
       images: images,
     };
@@ -307,6 +328,7 @@ export default function App() {
 
   const processScriptFile = async (file: File) => {
     setState(prev => ({ ...prev, isAnalyzing: true }));
+    setLoadingMessage("正在分析剧本文件...");
     try {
         let text = '';
         if (file.name.match(/\.docx$/i)) {
@@ -336,6 +358,7 @@ export default function App() {
         showAlert("读取文件失败，请重试。");
         setState(prev => ({ ...prev, isAnalyzing: false }));
     } finally {
+         setLoadingMessage("");
          // Reset file input if used
          if (scriptFileInputRef.current) {
             scriptFileInputRef.current.value = '';
@@ -383,6 +406,7 @@ export default function App() {
     }
 
     setState(prev => ({ ...prev, isAnalyzing: true }));
+    setLoadingMessage("正在分析视觉风格...");
     try {
       const style = await analyzeScriptStyle(state.script, state.cozeApiKey);
       setState(prev => ({
@@ -400,9 +424,12 @@ export default function App() {
       console.error(error);
       showAlert("分析剧本风格失败。请检查您的网络连接或 API Key 设置。");
       setState(prev => ({ ...prev, isAnalyzing: false }));
+    } finally {
+        setLoadingMessage("");
     }
   };
 
+  // Global Entity Extraction (Step 2) - Non-blocking UI
   const handleExtractEntities = async (force: boolean = false) => {
     // Basic validation before extraction
     const isStyleConfigured = state.style.paintingStyle.trim() !== '' || !!state.style.referenceImageId;
@@ -415,49 +442,293 @@ export default function App() {
         showChoice(
             "检测到已有的角色或场景数据。您想重新从剧本中提取（将覆盖现有内容）还是继续使用旧数据进行编辑？",
             () => handleExtractEntities(true),
-            () => setState(prev => ({ ...prev, step: AppStep.CHARACTERS_SCENES })),
+            () => setState(prev => ({ ...prev, step: AppStep.GLOBAL_ROLES })),
             "重新生成",
             "继续编辑"
         );
         return;
     }
 
-    setState(prev => ({ ...prev, isAnalyzing: true }));
-    try {
-      const data = await extractEntities(state.script, state.style, state.cozeApiKey);
-      
-      const newChars: Character[] = (data.characters || []).map((c, i) => ({
-        id: `char-${i}-${Date.now()}`,
-        name: c.name || '未知',
-        role: c.role || '',
-        setting: c.setting || '',
-        traits: c.traits || '',
-        visualPrompt: '',
-        images: []
-      }));
-
-      const newScenes: Scene[] = (data.scenes || []).map((s, i) => ({
-        id: `scene-${i}-${Date.now()}`,
-        name: s.name || '未知',
-        location: s.location || '',
-        traits: s.traits || '',
-        visualPrompt: '',
-        images: []
-      }));
-
-      setState(prev => ({
+    // Immediate Transition to UI
+    setState(prev => ({
         ...prev,
-        characters: newChars,
-        scenes: newScenes,
-        step: AppStep.CHARACTERS_SCENES,
-        isAnalyzing: false
-      }));
-      setCurrentIndex(0);
-    } catch (error) {
-      console.error(error);
-      showAlert("提取角色和场景失败。");
-      setState(prev => ({ ...prev, isAnalyzing: false }));
+        step: AppStep.GLOBAL_ROLES,
+        isExtractingGlobal: true, // Show loading state in list header
+        episodeCount: undefined, // Reset episode count when regenerating global
+        episodeStatus: {},
+        // If force, clear list. If not, maybe keep? But here logic suggests complete regeneration.
+        characters: force ? [] : prev.characters,
+        scenes: force ? [] : prev.scenes
+    }));
+    
+    setSelectedEpisode('all');
+    setCurrentIndex(0);
+
+    // Run extraction in background, parallel
+    performGlobalExtraction(state.script, state.style, state.cozeApiKey);
+  };
+
+  // Async function separate from handler to not block UI
+  const performGlobalExtraction = async (script: string, style: any, apiKey: string) => {
+      // We run both extractions in parallel and update state as soon as one returns
+      let pendingTasks = 2;
+      
+      const checkDone = () => {
+          pendingTasks--;
+          if (pendingTasks <= 0) {
+              setState(prev => ({ ...prev, isExtractingGlobal: false }));
+          }
+      };
+
+      // 1. Extract Characters
+      extractGlobalCharactersFromScript(script, style, apiKey)
+        .then((characters) => {
+             const newChars: Character[] = (characters || []).map((c, i) => ({
+                id: `char-${i}-${Date.now()}`,
+                name: c.name || '未知',
+                role: c.role || '',
+                setting: c.setting || '',
+                traits: c.traits || '',
+                visualPrompt: '',
+                images: []
+             }));
+             
+             setState(prev => ({
+                ...prev,
+                characters: newChars
+             }));
+        })
+        .catch(err => {
+            console.error("Global Char Extraction Failed", err);
+            // Optionally show toast/error for partial failure
+        })
+        .finally(checkDone);
+
+      // 2. Extract Scenes
+      extractGlobalScenesFromScript(script, style, apiKey)
+        .then((scenes) => {
+             const newScenes: Scene[] = (scenes || []).map((s, i) => ({
+                id: `scene-${i}-${Date.now()}`,
+                name: s.name || '未知',
+                location: s.location || '',
+                traits: s.traits || '',
+                visualPrompt: '',
+                images: []
+             }));
+
+             setState(prev => ({
+                ...prev,
+                scenes: newScenes
+             }));
+        })
+        .catch(err => {
+            console.error("Global Scene Extraction Failed", err);
+        })
+        .finally(checkDone);
+  };
+
+  // Episode Extraction (Step 3) - Incremental Logic
+  const handleGenerateEpisodeSettings = async (force: boolean = false) => {
+    // Check if episode data already exists
+    const hasEpisodeData = state.characters.some(c => c.episode) || state.scenes.some(s => s.episode);
+    
+    if (!force && hasEpisodeData) {
+       showChoice(
+           "检测到已有分集数据。您想重新生成所有分集设定（将覆盖现有内容）还是继续编辑？",
+           () => performEpisodeExtraction(), // Confirm (Regenerate)
+           () => setState(prev => ({ ...prev, step: AppStep.EPISODE_SETTINGS })), // Secondary (Continue)
+           "重新生成",
+           "继续编辑"
+       );
+       return;
     }
+
+    performEpisodeExtraction();
+  };
+
+  const performEpisodeExtraction = async () => {
+      // 1. Start Analysis UI
+      setState(prev => ({ ...prev, isAnalyzing: true }));
+      setLoadingMessage("正在拆解剧本集数...");
+
+      try {
+          // 2. Split Episodes
+          const episodes = await splitScriptToEpisodes(state.script, state.cozeApiKey);
+          const episodeCount = episodes.length;
+
+          if (episodeCount === 0) {
+              throw new Error("未能识别出剧集信息，请检查剧本格式。");
+          }
+
+          // 3. Initialize Status and Transition to View
+          // We set isAnalyzing to false immediately after splitting so user can see the structure
+          const initialStatus: Record<number, 'pending' | 'loading' | 'done'> = {};
+          for (let i = 1; i <= episodeCount; i++) initialStatus[i] = 'pending';
+
+          // Clear previous episode data if any (since this is a fresh start/regenerate)
+          setState(prev => ({
+              ...prev,
+              step: AppStep.EPISODE_SETTINGS,
+              isAnalyzing: false, // Hide overlay, start background process
+              episodeCount: episodeCount,
+              episodeStatus: initialStatus,
+              characters: prev.characters.filter(c => !c.episode), // Keep only global
+              scenes: prev.scenes.filter(s => !s.episode) // Keep only global
+          }));
+          
+          // Set selection to Ep 1 immediately so user watches it fill
+          setSelectedEpisode(1);
+          setCurrentIndex(0);
+
+          // 4. Incremental Extraction Loop
+          // Get reference info from Global entities
+          const existingRoleNames = stateRef.current.characters
+                .filter(c => !c.episode) 
+                .map(c => c.name).join(',');
+          
+          const existingSceneNames = stateRef.current.scenes
+                .filter(s => !s.episode)
+                .map(s => s.name).join(',');
+          
+          for (let i = 0; i < episodeCount; i++) {
+              const epNum = i + 1;
+              
+              // Update status to loading for this episode
+              setState(prev => ({
+                  ...prev,
+                  episodeStatus: { ...prev.episodeStatus, [epNum]: 'loading' }
+              }));
+
+              try {
+                  // Parallel extraction for Characters and Scenes
+                  const [charData, sceneList] = await Promise.all([
+                      extractEpisodeEntities(
+                        stateRef.current.script, 
+                        stateRef.current.style, 
+                        existingRoleNames, 
+                        epNum, 
+                        stateRef.current.cozeApiKey
+                      ).catch(e => { console.error(`Ep${epNum} char extraction error`, e); return { characters: [], scenes: [] }; }),
+                      
+                      extractEpisodeScenes(
+                        stateRef.current.script,
+                        stateRef.current.style,
+                        existingSceneNames,
+                        epNum,
+                        stateRef.current.cozeApiKey
+                      ).catch(e => { console.error(`Ep${epNum} scene extraction error`, e); return []; })
+                  ]);
+    
+                  const epChars: Character[] = (charData.characters || []).map((c, idx) => {
+                      // Attempt to find global counterpart to inherit image (Default behavior)
+                      const globalMatch = stateRef.current.characters.find(gc => !gc.episode && gc.name === c.name);
+                      const initialImages = (globalMatch && globalMatch.images && globalMatch.images.length > 0) 
+                         ? [globalMatch.images[0]] 
+                         : [];
+
+                      return {
+                          id: `ep${epNum}-char-${idx}-${Date.now()}`,
+                          name: c.name || '未知',
+                          role: c.role || '',
+                          setting: c.setting || '',
+                          traits: c.traits || '',
+                          visualPrompt: '',
+                          images: initialImages,
+                          episode: epNum
+                      };
+                  });
+
+                  const epScenes: Scene[] = (sceneList || []).map((s, idx) => {
+                      const globalMatch = stateRef.current.scenes.find(gs => !gs.episode && gs.name === s.name);
+                      const initialImages = (globalMatch && globalMatch.images && globalMatch.images.length > 0) 
+                         ? [globalMatch.images[0]] 
+                         : [];
+
+                      return {
+                          id: `ep${epNum}-scene-${idx}-${Date.now()}`,
+                          name: s.name || '未知',
+                          location: s.location || '',
+                          traits: s.traits || '',
+                          visualPrompt: '',
+                          images: initialImages,
+                          episode: epNum
+                      };
+                  });
+    
+                  // Append new entities and mark done
+                  setState(prev => ({
+                      ...prev,
+                      characters: [...prev.characters, ...epChars],
+                      scenes: [...prev.scenes, ...epScenes],
+                      episodeStatus: { ...prev.episodeStatus, [epNum]: 'done' }
+                  }));
+              } catch (e) {
+                  console.error(`Error processing episode ${epNum}`, e);
+                   // Mark as done (or error state if we had one, but done allows continuation)
+                  setState(prev => ({
+                      ...prev,
+                      episodeStatus: { ...prev.episodeStatus, [epNum]: 'done' } // technically failed but unblocking
+                  }));
+              }
+          }
+
+      } catch (error) {
+          console.error("Episode extraction failed", error);
+          showAlert("分集提取失败，请重试。");
+          setState(prev => ({ ...prev, isAnalyzing: false }));
+      } finally {
+          setLoadingMessage("");
+      }
+  };
+
+  // Storyboard Extraction (Step 4/5)
+  const handleGenerateStoryboard = async (episodeNum: number) => {
+      if (!state.cozeApiKey) {
+          setIsSettingsOpen(true);
+          showAlert("请先配置 Coze API Key");
+          return;
+      }
+
+      // Set status to loading
+      setState(prev => ({
+          ...prev,
+          storyboardStatus: { ...prev.storyboardStatus, [episodeNum]: 'loading' }
+      }));
+
+      try {
+          const shots = await extractEpisodeStoryboard(
+              state.script,
+              state.style,
+              episodeNum,
+              state.cozeApiKey
+          );
+
+          const newShots: Shot[] = shots.map((s, idx) => ({
+              id: `ep${episodeNum}-shot-${idx}-${Date.now()}`,
+              episode: episodeNum,
+              shotNumber: s.shotNumber || idx + 1,
+              description: s.description || '',
+              visualPrompt: s.visualPrompt || '',
+              camera: s.camera || '',
+              audio: s.audio || '',
+              duration: s.duration || '',
+              isGeneratingImage: false
+          }));
+
+          setState(prev => ({
+              ...prev,
+              shots: [...prev.shots.filter(s => s.episode !== episodeNum), ...newShots],
+              storyboardStatus: { ...prev.storyboardStatus, [episodeNum]: 'done' }
+          }));
+
+      } catch (error) {
+          console.error(`Storyboard extraction failed for Ep ${episodeNum}`, error);
+          setState(prev => ({
+              ...prev,
+              storyboardStatus: { ...prev.storyboardStatus, [episodeNum]: 'pending' } // Reset to pending on failure
+          }));
+          showAlert(`第 ${episodeNum} 集分镜生成失败`);
+      }
   };
 
   const updateEntity = (type: 'character' | 'scene', id: string, field: string, value: any) => {
@@ -476,6 +747,13 @@ export default function App() {
     });
   };
 
+  const updateShot = (id: string, field: string, value: any) => {
+      setState(prev => ({
+          ...prev,
+          shots: prev.shots.map(s => s.id === id ? { ...s, [field]: value } : s)
+      }));
+  };
+
   const setEntityLoading = (type: 'character' | 'scene', id: string, loadingField: 'isGeneratingImage' | 'isGeneratingPrompt', isLoading: boolean) => {
       setState(prev => {
         if (type === 'character') {
@@ -492,20 +770,26 @@ export default function App() {
       });
   };
 
+  const setShotLoading = (id: string, isLoading: boolean) => {
+      setState(prev => ({
+          ...prev,
+          shots: prev.shots.map(s => s.id === id ? { ...s, isGeneratingImage: isLoading } : s)
+      }));
+  };
+
   const handleAddEntity = () => {
     const type = activeTab;
     const id = `${type === 'characters' ? 'char' : 'scene'}-${Date.now()}`;
+    const ep = selectedEpisode === 'all' ? undefined : selectedEpisode;
+    
     const newItem = type === 'characters' 
-      ? { id, name: '新角色', role: '待定', setting: '', traits: '', visualPrompt: '', images: [] } as Character
-      : { id, name: '新场景', location: '待定', traits: '', visualPrompt: '', images: [] } as Scene;
+      ? { id, name: '新角色', role: '待定', setting: '', traits: '', visualPrompt: '', images: [], episode: ep } as Character
+      : { id, name: '新场景', location: '待定', traits: '', visualPrompt: '', images: [], episode: ep } as Scene;
     
     setState(prev => ({
         ...prev,
         [type === 'characters' ? 'characters' : 'scenes']: [...prev[type === 'characters' ? 'characters' : 'scenes'], newItem]
     }));
-    
-    const currentList = stateRef.current[activeTab === 'characters' ? 'characters' : 'scenes'];
-    setCurrentIndex(currentList.length); 
   };
 
   const handleDeleteEntity = (e: React.MouseEvent, id: string) => {
@@ -522,10 +806,8 @@ export default function App() {
             return { ...prev, [listKey]: newList };
         });
 
-        const currentListLen = stateRef.current[listKey].length;
-        if (currentIndex >= currentListLen - 1) {
-            setCurrentIndex(Math.max(0, currentListLen - 2));
-        }
+        // Reset index safely
+        setCurrentIndex(0);
     });
   };
 
@@ -538,6 +820,7 @@ export default function App() {
   const handleListDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     if (draggedIndex === null || draggedIndex === index) return;
+    if (selectedEpisode !== 'all') return; // Disable reordering when filtered for simplicity
 
     const listKey = activeTab === 'characters' ? 'characters' : 'scenes';
     const list = [...state[listKey]];
@@ -605,8 +888,9 @@ export default function App() {
         const currentTab = activeTabRef.current;
         const type = currentTab === 'characters' ? 'character' : 'scene';
         const listKey = currentTab === 'characters' ? 'characters' : 'scenes';
-        const list = stateRef.current[listKey];
         
+        // Only process items in current filter view ideally, but for now process all valid
+        const list = stateRef.current[listKey];
         const candidate = list.find((item: any) => !item.visualPrompt && !item.isGeneratingPrompt);
         
         if (!candidate) {
@@ -762,6 +1046,58 @@ export default function App() {
      }
   };
 
+  const handleGenerateShotImage = async (id: string, model?: string, referenceImageUrls?: string[]) => {
+      const shot = state.shots.find(s => s.id === id);
+      if (!shot || !shot.visualPrompt) return;
+
+      setShotLoading(id, true);
+      try {
+          const fileIds: string[] = [];
+
+          // Upload all selected reference images
+          if (referenceImageUrls && referenceImageUrls.length > 0) {
+              try {
+                  for (const url of referenceImageUrls) {
+                      const result = await uploadImageFromUrl(url, state.cozeApiKey);
+                      if (result && result.id) {
+                          fileIds.push(result.id);
+                      }
+                  }
+              } catch (e) {
+                  console.error("Failed to upload reference image(s)", e);
+                  showAlert("部分参考图上传失败，将尝试使用成功上传的图片生成。");
+              }
+          }
+
+          // Generate image with all reference IDs
+          let finalPrompt = shot.visualPrompt;
+          if (fileIds.length > 0) {
+              finalPrompt += "。参考图：使用上传的参考图进行绘制";
+          }
+
+          // Pass the file IDs to the generation service
+          const images = await generateVisualAsset(
+              finalPrompt, 
+              state.style, 
+              state.cozeApiKey, 
+              model, 
+              undefined, // specificReferenceId (legacy, unused here)
+              fileIds    // referenceFileIds
+          );
+          
+          if (images.length > 0) {
+              const imageUrl = images[0];
+              updateShot(id, 'image', imageUrl);
+              addToHistory('shot', shot, [imageUrl]);
+          }
+      } catch (e) {
+          console.error("Shot image gen failed", e);
+          showAlert("分镜绘制失败");
+      } finally {
+          setShotLoading(id, false);
+      }
+  };
+
   const handleReferenceImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -773,6 +1109,7 @@ export default function App() {
     }
 
     setState(prev => ({ ...prev, isAnalyzing: true }));
+    setLoadingMessage("正在上传参考图片...");
     try {
         const result = await uploadFileToCoze(file, state.cozeApiKey);
         setState(prev => ({
@@ -789,6 +1126,8 @@ export default function App() {
         console.error("File upload failed", error);
         showAlert("参考图上传失败，请稍后重试。");
         setState(prev => ({ ...prev, isAnalyzing: false }));
+    } finally {
+        setLoadingMessage("");
     }
   };
 
@@ -974,173 +1313,296 @@ export default function App() {
               </div>
           </div>
 
-          <div className="mt-8 flex justify-between items-center border-t border-slate-100 pt-6">
+          <div className="mt-8 flex flex-col md:flex-row justify-between items-center gap-4 border-t border-slate-100 pt-6">
             <button 
               onClick={() => setState(s => ({ ...s, step: AppStep.INPUT_SCRIPT }))}
-              className="text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1"
+              className="text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1 order-1"
             >
               <ArrowLeft className="w-4 h-4" />
               返回剧本
             </button>
-            <button
-              onClick={() => handleExtractEntities()}
-              disabled={!isStyleConfigured}
-              className={`flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all ${
-                isStyleConfigured 
-                ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm' 
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-              }`}
-            >
-              {state.characters.length > 0 || state.scenes.length > 0 ? "管理角色和场景" : "生成角色和场景"}
-              <ArrowRight className="w-5 h-5" />
-            </button>
+            
+            <div className="flex gap-4 order-2 md:order-2 flex-wrap justify-center">
+                {/* Global Extraction Button Only */}
+                <button
+                onClick={() => handleExtractEntities()}
+                disabled={!isStyleConfigured}
+                className={`flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all ${
+                    isStyleConfigured 
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm' 
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                }`}
+                >
+                <Users className="w-4 h-4" />
+                提取整体角色场景
+                <ArrowRight className="w-5 h-5" />
+                </button>
+            </div>
           </div>
         </div>
       </div>
     );
   };
 
-  const renderCharactersScenesStep = () => {
-     const list = activeTab === 'characters' ? state.characters : state.scenes;
-     const currentItem = list[currentIndex];
+  const renderEntitiesStep = () => {
+     const isEpisodeStep = state.step === AppStep.EPISODE_SETTINGS;
+     
+     // Filter list based on activeTab AND selectedEpisode
+     const fullList = activeTab === 'characters' ? state.characters : state.scenes;
+     
+     // Filtering Logic:
+     // - If Global Step: Show items with no episode.
+     // - If Episode Step:
+     //   - 'all': Show items with no episode (Global).
+     //   - number: Show items for that episode.
+     const filteredList = isEpisodeStep 
+        ? (selectedEpisode === 'all' 
+             ? fullList.filter(item => !item.episode) // Show global in "Overall" tab 
+             : fullList.filter(item => item.episode === selectedEpisode)
+          )
+        : fullList.filter(item => !item.episode); // Show only global ones in Step 2
+
+     const currentItem = filteredList[currentIndex];
+
+     // Find the corresponding global entity if we are in Episode Step and current item has an episode
+     // We match by Name (assuming names are consistent). 
+     // Global items have episode: undefined
+     const globalEntity = isEpisodeStep && currentItem && currentItem.episode
+        ? fullList.find(i => !i.episode && i.name === currentItem.name)
+        : undefined;
 
      return (
        <div className="flex flex-col md:flex-row h-[calc(100vh-100px)] bg-slate-100 border-t border-slate-200">
-          {/* Sidebar */}
-          <div className="w-full md:w-80 h-48 md:h-full bg-white flex flex-col border-b md:border-b-0 md:border-r border-slate-200 flex-shrink-0">
-             <div className="p-4 border-b border-slate-100">
-               <div className="flex items-center justify-between mb-4">
-                    <button 
-                        onClick={() => setState(s => ({ ...s, step: AppStep.OVERALL_STYLE }))}
-                        className="text-xs text-slate-500 hover:text-indigo-600 flex items-center gap-1 transition-colors"
-                    >
-                        <ArrowLeft className="w-3 h-3" />
-                        返回风格设定
-                    </button>
-                    {(state.characters.length > 0 || state.scenes.length > 0) && (
-                        <button 
-                            onClick={() => handleExtractEntities(true)}
-                            className="text-[10px] text-amber-600 hover:text-amber-700 flex items-center gap-1 transition-colors bg-amber-50 px-1.5 py-0.5 rounded"
-                            title="重新从剧本提取"
-                        >
-                            <RotateCcw className="w-2 h-2" />
-                            重新生成
-                        </button>
-                    )}
-               </div>
-
-               <div className="flex bg-slate-100 p-1 rounded-lg mb-4">
-                  <button 
-                    onClick={() => { setActiveTab('characters'); setCurrentIndex(0); }}
-                    className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'characters' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
-                  >
-                    <Users className="w-4 h-4" />
-                    角色
-                  </button>
-                  <button 
-                    onClick={() => { setActiveTab('scenes'); setCurrentIndex(0); }}
-                    className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'scenes' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
-                  >
-                    <MapPin className="w-4 h-4" />
-                    场景
-                  </button>
-               </div>
-               
-               <div className="flex justify-between items-center">
-                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">列表 ({list.length})</span>
-                 <button 
-                   onClick={handleAddEntity}
-                   className="p-1 hover:bg-slate-100 rounded text-slate-500 hover:text-indigo-600 transition-colors"
-                   title="新增项目"
-                 >
-                   <Plus className="w-4 h-4" />
-                 </button>
-               </div>
-             </div>
-
-             <div className="flex-1 overflow-y-auto">
-               {list.length === 0 ? (
-                 <div className="p-8 text-center text-slate-400 text-sm">
-                   暂无{activeTab === 'characters' ? '角色' : '场景'}数据
+          
+          {/* Main Sidebar Container (Split) */}
+          <div className="w-full md:w-96 h-48 md:h-full bg-white flex flex-shrink-0 border-b md:border-b-0 md:border-r border-slate-200">
+             
+             {/* Left Column: Episode Navigation (Only visible in Episode Step) */}
+             {isEpisodeStep && (
+                 <div className="w-24 bg-slate-50 border-r border-slate-200 flex flex-col py-4 gap-2 overflow-y-auto flex-shrink-0">
+                     <div className="px-3 pb-2 text-xs font-bold text-slate-400 uppercase tracking-wider">剧集</div>
+                     
+                     {/* Episode List */}
+                     {state.episodeCount && Array.from({ length: state.episodeCount }).map((_, i) => {
+                         const epNum = i + 1;
+                         const status = state.episodeStatus?.[epNum] || 'pending';
+                         
+                         return (
+                            <button 
+                                key={epNum}
+                                onClick={() => { setSelectedEpisode(epNum); setCurrentIndex(0); }}
+                                className={`mx-2 p-2 text-xs rounded-lg transition-all flex flex-col items-center gap-1 relative overflow-hidden ${
+                                    selectedEpisode === epNum 
+                                    ? 'bg-white shadow-sm text-indigo-600 ring-1 ring-slate-200' 
+                                    : 'text-slate-500 hover:bg-slate-100'
+                                }`}
+                            >
+                                <span className="z-10 relative">第{epNum}集</span>
+                                {status === 'loading' && <Loader2 className="w-3 h-3 animate-spin text-indigo-500 z-10" />}
+                                {status === 'done' && selectedEpisode !== epNum && <div className="absolute bottom-1 right-1 w-1.5 h-1.5 bg-green-500 rounded-full"></div>}
+                            </button>
+                         );
+                     })}
                  </div>
-               ) : (
-                 <ul className="divide-y divide-slate-50">
-                    {list.map((item, index) => (
-                      <li 
-                        key={item.id} 
-                        draggable
-                        onDragStart={(e) => handleDragStart(e, index)}
-                        onDragOver={(e) => handleListDragOver(e, index)}
-                        className={`group relative ${draggedIndex === index ? 'opacity-50' : ''}`}
-                      >
-                         <div
-                          onClick={() => setCurrentIndex(index)}
-                          className={`w-full text-left pl-3 pr-10 py-3 cursor-pointer transition-colors flex items-center gap-3 relative ${
-                            index === currentIndex 
-                              ? 'bg-indigo-50 border-l-4 border-indigo-600' 
-                              : 'hover:bg-slate-50 border-l-4 border-transparent'
-                          }`}
-                        >
-                           <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 p-1">
-                              <GripVertical className="w-4 h-4" />
-                           </div>
+             )}
 
-                           <div className="min-w-0 flex-1">
-                             <div className="flex items-center gap-2">
-                               <p className={`text-sm font-medium truncate ${index === currentIndex ? 'text-indigo-900' : 'text-slate-700'}`}>
-                                 {item.name}
-                               </p>
-                               {item.isGeneratingPrompt && (
-                                 <Loader2 className="w-3 h-3 text-indigo-500 animate-spin flex-shrink-0" />
-                               )}
-                             </div>
-                             <p className="text-xs text-slate-500 truncate mt-0.5">
-                               {activeTab === 'characters' ? (item as Character).role : (item as Scene).location}
-                             </p>
-                           </div>
-
-                           {(item.images && item.images.length > 0) && (
-                              <div className="w-8 h-8 rounded bg-slate-200 overflow-hidden flex-shrink-0 border border-slate-300">
-                                <img src={item.images[0]} alt="" className="w-full h-full object-cover" />
-                              </div>
-                           )}
-                        </div>
-
+             {/* Right Column: Entity List */}
+             <div className="flex-1 flex flex-col bg-white min-w-0">
+                 <div className="p-4 border-b border-slate-100">
+                    {/* Back Button */}
+                   <div className="flex items-center justify-between mb-4">
                         <button 
-                             onClick={(e) => handleDeleteEntity(e, item.id)}
-                             className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-white hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-full shadow-sm border border-slate-200 z-20 cursor-pointer opacity-0 group-hover:opacity-100 transition-all"
-                             title="删除"
-                           >
-                              <Trash2 className="w-4 h-4" />
+                            onClick={() => setState(s => ({ 
+                                 ...s, 
+                                 step: isEpisodeStep ? AppStep.GLOBAL_ROLES : AppStep.OVERALL_STYLE 
+                            }))}
+                            className="text-xs text-slate-500 hover:text-indigo-600 flex items-center gap-1 transition-colors"
+                        >
+                            <ArrowLeft className="w-3 h-3" />
+                            {isEpisodeStep ? '返回整体角色' : '返回风格设定'}
                         </button>
-                      </li>
-                    ))}
-                 </ul>
-               )}
-             </div>
+                   </div>
 
-             <div className="p-4 border-t border-slate-200 bg-slate-50">
-               <button 
-                   onClick={handleToggleBulkGenerate}
-                   disabled={list.length === 0 && !isBulkGenerating}
-                   className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm shadow-sm transition-all border
-                      ${isBulkGenerating 
-                        ? 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100' 
-                        : 'bg-white border-slate-300 text-slate-700 hover:border-indigo-300 hover:text-indigo-600'
-                      } disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  {isBulkGenerating ? (
-                    <>
-                       <Pause className="w-4 h-4" />
-                       暂停生成
-                    </>
-                  ) : (
-                    <>
-                       <Play className="w-4 h-4" />
-                       批量生成提示词
-                    </>
-                  )}
-                </button>
+                   {/* Generate Button (Step 2) and Export Button */}
+                   {!isEpisodeStep && (
+                       <div className="mb-4 flex gap-2">
+                           {/* Generate Episode Settings Button */}
+                           <button
+                            onClick={() => handleGenerateEpisodeSettings()}
+                            className="flex-1 flex items-center justify-center gap-1 px-3 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm shadow-sm transition-all"
+                           >
+                               <Layers className="w-4 h-4" />
+                               生成分集设定
+                               <ArrowRight className="w-4 h-4" />
+                           </button>
+
+                           {/* Export PPT Button (Moved here) */}
+                           <button
+                            onClick={handleExportPPT}
+                            disabled={isExportingPPT}
+                            className="flex items-center justify-center px-3 py-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-600 border border-emerald-200 rounded-lg font-medium text-sm transition-all relative"
+                            title="导出 PPT"
+                           >
+                                {isExportingPPT ? (
+                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                ) : (
+                                    <Presentation className="w-5 h-5" />
+                                )}
+                           </button>
+                       </div>
+                   )}
+
+                   {/* Next Button (Step 3 to 4) - ONLY in Step 3 */}
+                   {isEpisodeStep && (
+                       <div className="mb-4">
+                           <button
+                            onClick={() => {
+                                // Default select first ep when entering storyboard
+                                setSelectedEpisode(1);
+                                setState(s => ({ ...s, step: AppStep.STORYBOARD }));
+                            }}
+                            className="w-full flex items-center justify-center gap-1 px-3 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm shadow-sm transition-all"
+                           >
+                               <Film className="w-4 h-4" />
+                               下一步：分集分镜
+                               <ArrowRight className="w-4 h-4" />
+                           </button>
+                       </div>
+                   )}
+                   
+                   {/* Tabs */}
+                   <div className="flex bg-slate-100 p-1 rounded-lg mb-4">
+                      <button 
+                        onClick={() => { setActiveTab('characters'); setCurrentIndex(0); }}
+                        className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'characters' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                      >
+                        <Users className="w-4 h-4" />
+                        角色
+                      </button>
+                      <button 
+                        onClick={() => { setActiveTab('scenes'); setCurrentIndex(0); }}
+                        className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'scenes' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                      >
+                        <MapPin className="w-4 h-4" />
+                        场景
+                      </button>
+                   </div>
+
+                   {/* List Header */}
+                   <div className="flex justify-between items-center">
+                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                         列表 ({filteredList.length})
+                     </span>
+                     <button 
+                       onClick={handleAddEntity}
+                       className="p-1 hover:bg-slate-100 rounded text-slate-500 hover:text-indigo-600 transition-colors"
+                       title="新增项目"
+                     >
+                       <Plus className="w-4 h-4" />
+                     </button>
+                   </div>
+                 </div>
+
+                 {/* List Content */}
+                 <div className="flex-1 overflow-y-auto">
+                   {filteredList.length === 0 ? (
+                     <div className="p-8 text-center text-slate-400 text-sm flex flex-col items-center">
+                       {/* Modified loading condition to allow list to show if we have data even if still extracting */}
+                       {(state.episodeStatus?.[selectedEpisode as number] === 'loading' || (state.isExtractingGlobal && filteredList.length === 0)) ? (
+                            <>
+                                <Loader2 className="w-8 h-8 text-indigo-500 animate-spin mb-2" />
+                                正在生成内容...
+                            </>
+                       ) : (
+                           <>
+                                <List className="w-8 h-8 mb-2 opacity-20" />
+                                暂无数据
+                           </>
+                       )}
+                     </div>
+                   ) : (
+                     <ul className="divide-y divide-slate-50">
+                        {filteredList.map((item, index) => (
+                          <li 
+                            key={item.id} 
+                            draggable={true}
+                            onDragStart={(e) => handleDragStart(e, index)}
+                            onDragOver={(e) => handleListDragOver(e, index)}
+                            className={`group relative ${draggedIndex === index ? 'opacity-50' : ''}`}
+                          >
+                             <div
+                              onClick={() => setCurrentIndex(index)}
+                              className={`w-full text-left pl-3 pr-10 py-3 cursor-pointer transition-colors flex items-center gap-3 relative ${
+                                index === currentIndex 
+                                  ? 'bg-indigo-50 border-l-4 border-indigo-600' 
+                                  : 'hover:bg-slate-50 border-l-4 border-transparent'
+                              }`}
+                            >
+                               <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 p-1">
+                                  <GripVertical className="w-4 h-4" />
+                               </div>
+
+                               <div className="min-w-0 flex-1">
+                                 <div className="flex items-center gap-2">
+                                   <p className={`text-sm font-medium truncate ${index === currentIndex ? 'text-indigo-900' : 'text-slate-700'}`}>
+                                     {item.name}
+                                   </p>
+                                   {item.episode && !isEpisodeStep && (
+                                       <span className="text-[10px] bg-indigo-50 text-indigo-600 px-1 rounded border border-indigo-100">Ep {item.episode}</span>
+                                   )}
+                                   {item.isGeneratingPrompt && (
+                                     <Loader2 className="w-3 h-3 text-indigo-500 animate-spin flex-shrink-0" />
+                                   )}
+                                 </div>
+                                 <p className="text-xs text-slate-500 truncate mt-0.5">
+                                   {activeTab === 'characters' ? (item as Character).role : (item as Scene).location}
+                                 </p>
+                               </div>
+
+                               {(item.images && item.images.length > 0) && (
+                                  <div className="w-8 h-8 rounded bg-slate-200 overflow-hidden flex-shrink-0 border border-slate-300">
+                                    <img src={item.images[0]} alt="" className="w-full h-full object-cover" />
+                                  </div>
+                               )}
+                            </div>
+
+                            <button 
+                                 onClick={(e) => handleDeleteEntity(e, item.id)}
+                                 className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-white hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-full shadow-sm border border-slate-200 z-20 cursor-pointer opacity-0 group-hover:opacity-100 transition-all"
+                                 title="删除"
+                               >
+                                  <Trash2 className="w-4 h-4" />
+                            </button>
+                          </li>
+                        ))}
+                     </ul>
+                   )}
+                 </div>
+                 
+                 {/* Bulk Actions Footer */}
+                 <div className="p-4 border-t border-slate-200 bg-slate-50">
+                   <button 
+                       onClick={handleToggleBulkGenerate}
+                       disabled={filteredList.length === 0 && !isBulkGenerating}
+                       className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm shadow-sm transition-all border
+                          ${isBulkGenerating 
+                            ? 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100' 
+                            : 'bg-white border-slate-300 text-slate-700 hover:border-indigo-300 hover:text-indigo-600'
+                          } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {isBulkGenerating ? (
+                        <>
+                           <Pause className="w-4 h-4" />
+                           暂停生成
+                        </>
+                      ) : (
+                        <>
+                           <Play className="w-4 h-4" />
+                           批量生成提示词
+                        </>
+                      )}
+                    </button>
+                 </div>
              </div>
           </div>
 
@@ -1152,6 +1614,7 @@ export default function App() {
                     key={currentItem.id}
                     type={activeTab === 'characters' ? 'character' : 'scene'}
                     entity={currentItem}
+                    globalEntity={globalEntity} // Pass the found global entity
                     onUpdate={(id, field, value) => updateEntity(activeTab === 'characters' ? 'character' : 'scene', id, field, value)}
                     onGeneratePrompt={(id) => generateEntityPrompt(activeTab === 'characters' ? 'character' : 'scene', id)}
                     onGenerateImage={(id, model) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id, model)}
@@ -1160,14 +1623,56 @@ export default function App() {
                   />
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
-                  <Layout className="w-12 h-12 mb-3 opacity-20" />
-                  <p>请选择左侧列表查看详情</p>
+                  {state.isExtractingGlobal ? (
+                      <>
+                        <Loader2 className="w-12 h-12 mb-3 text-indigo-500 animate-spin" />
+                        <p>正在后台分析剧本，提取角色与场景...</p>
+                      </>
+                  ) : (
+                      <>
+                        <Layout className="w-12 h-12 mb-3 opacity-20" />
+                        <p>请选择左侧列表查看详情</p>
+                      </>
+                  )}
                 </div>
               )}
             </div>
           </div>
        </div>
      );
+  };
+
+  const renderStoryboardStep = () => {
+    return (
+        <div className="h-full">
+            <div className="px-4 py-2 bg-white border-b border-slate-200 flex items-center justify-between">
+                <button 
+                    onClick={() => setState(s => ({ ...s, step: AppStep.EPISODE_SETTINGS }))}
+                    className="text-xs text-slate-500 hover:text-indigo-600 flex items-center gap-1 transition-colors"
+                >
+                    <ArrowLeft className="w-3 h-3" />
+                    返回分集设定
+                </button>
+                <h2 className="text-sm font-bold text-slate-700">分镜制作</h2>
+                <div className="w-10"></div> {/* Spacer */}
+            </div>
+            
+            <StoryboardView
+                episodeCount={state.episodeCount || 0}
+                selectedEpisode={selectedEpisode as number}
+                storyboardStatus={state.storyboardStatus || {}}
+                shots={state.shots}
+                characters={state.characters}
+                scenes={state.scenes}
+                onEpisodeChange={(ep) => setSelectedEpisode(ep)}
+                onGenerate={handleGenerateStoryboard}
+                onUpdateShot={updateShot}
+                onGenerateImage={handleGenerateShotImage}
+                onGeneratePrompt={() => {}} // Not auto-generating prompts separately for shots in this version
+                onPreviewImage={setPreviewImageUrl}
+            />
+        </div>
+    );
   };
 
   // --- Render Flow ---
@@ -1213,19 +1718,6 @@ export default function App() {
          <div className="w-px h-6 bg-slate-300 mx-1"></div>
 
          <button
-            onClick={handleExportPPT}
-            disabled={isExportingPPT}
-            className="p-2 rounded-full bg-white text-slate-500 hover:text-emerald-600 border border-slate-200 hover:border-emerald-200 shadow-sm transition-all relative"
-            title="导出 PPT"
-         >
-            {isExportingPPT ? (
-               <Loader2 className="w-5 h-5 animate-spin text-emerald-500" />
-            ) : (
-               <Presentation className="w-5 h-5" />
-            )}
-         </button>
-
-         <button
             onClick={() => setIsHistoryOpen(true)}
             className="p-2 rounded-full bg-white text-slate-500 hover:text-indigo-600 border border-slate-200 hover:border-indigo-200 shadow-sm transition-all"
             title="生成历史"
@@ -1248,10 +1740,11 @@ export default function App() {
 
       <StepIndicator currentStep={state.step} />
       
-      <div className={`flex-1 relative ${state.step === AppStep.CHARACTERS_SCENES ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <div className={`flex-1 relative ${state.step >= AppStep.GLOBAL_ROLES ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {state.step === AppStep.INPUT_SCRIPT && renderInputStep()}
         {state.step === AppStep.OVERALL_STYLE && renderStyleStep()}
-        {state.step === AppStep.CHARACTERS_SCENES && renderCharactersScenesStep()}
+        {(state.step === AppStep.GLOBAL_ROLES || state.step === AppStep.EPISODE_SETTINGS) && renderEntitiesStep()}
+        {state.step === AppStep.STORYBOARD && renderStoryboardStep()}
         
         <CustomDialog 
           isOpen={dialogConfig.isOpen}
@@ -1291,7 +1784,7 @@ export default function App() {
         <LoadingOverlay message={
             isExportingPPT 
             ? "正在生成 PPT 文件，请稍候..." 
-            : (state.step === AppStep.INPUT_SCRIPT ? "正在分析视觉风格..." : "正在处理中...")
+            : (loadingMessage || "正在处理中...")
         } />
       )}
     </div>
