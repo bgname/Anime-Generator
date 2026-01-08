@@ -9,7 +9,7 @@ interface EntityCardProps {
   type: 'character' | 'scene';
   onUpdate: (id: string, field: string, value: any) => void;
   onGeneratePrompt: (id: string) => void;
-  onGenerateImage: (id: string, model?: string) => void;
+  onGenerateImage: (id: string) => void;
   onShowDialog: (message: string, onConfirm: () => void) => void;
   onPreviewImage: (url: string) => void;
 }
@@ -27,13 +27,11 @@ export const EntityCard: React.FC<EntityCardProps> = ({
   // For scenes and characters (unified), we use the gallery logic
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [viewingGlobal, setViewingGlobal] = useState(false); // Track if we are viewing a global image
-  const [model, setModel] = useState('Doubao-Seedream-4.0');
 
   // Reset selection when entity changes
   useEffect(() => {
     setSelectedImageIndex(0);
     setViewingGlobal(false);
-    setModel('Doubao-Seedream-4.0');
   }, [entity.id]);
 
   // Helper to safely access properties
@@ -167,7 +165,7 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                         {/* Add Button */}
                         {entity.visualPrompt && !entity.isGeneratingImage && (
                             <button 
-                                onClick={(e) => { e.stopPropagation(); onGenerateImage(entity.id, model); }}
+                                onClick={(e) => { e.stopPropagation(); onGenerateImage(entity.id); }}
                                 className="flex items-center justify-center gap-1 text-[10px] px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-full transition-colors font-medium border border-indigo-200 shadow-sm"
                             >
                                 <Plus className="w-3 h-3" />
@@ -290,16 +288,6 @@ export const EntityCard: React.FC<EntityCardProps> = ({
                   <label className="text-xs lg:text-sm font-semibold text-indigo-600 uppercase tracking-wider flex items-center gap-2">
                     视觉提示词
                   </label>
-                  <div className="flex items-center gap-1.5 ml-2">
-                        <select 
-                            value={model} 
-                            onChange={(e) => setModel(e.target.value)}
-                            className="text-xs border border-indigo-100 bg-indigo-50 text-indigo-700 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer font-medium hover:bg-indigo-100 transition-colors"
-                        >
-                            <option value="Doubao-Seedream-4.0">Doubao-Seedream-4.0</option>
-                            <option value="Doubao-Seedream-3.0">Doubao-Seedream-3.0</option>
-                        </select>
-                  </div>
               </div>
               <button 
                 onClick={() => onGeneratePrompt(entity.id)}

@@ -46,16 +46,33 @@ import {
   FileText, Wand2, ArrowRight, Layout, MapPin, Users, Palette, Loader2,
   Plus, Trash2, GripVertical, Play, Pause, Settings, History, Upload, Image as ImageIcon,
   ArrowLeft, RotateCcw, AlertCircle, LogOut, Folder, AlertTriangle, FileUp, Presentation,
-  Layers, Film, List
+  Layers, Film, List, Monitor, Smartphone, Maximize
 } from 'lucide-react';
 
 const savedKey = localStorage.getItem('coze_api_key') || '';
+
+// Aspect Ratio Constants
+export const ASPECT_RATIOS = {
+  '1:1': { width: 2048, height: 2048, label: '1:1 正方形，头像 (2048x2048)' },
+  '2:3': { width: 2048, height: 3072, label: '2:3 社交媒体，自拍 (2048x3072)' },
+  '3:4': { width: 1536, height: 2048, label: '3:4 经典比例，拍照 (1536x2048)' },
+  '4:3': { width: 2048, height: 1536, label: '4:3 经典比例，拍照 (2048x1536)' },
+  '9:16': { width: 1440, height: 2560, label: '9:16 手机壁纸，人像 (1440x2560)' },
+  '16:9': { width: 2560, height: 1440, label: '16:9 桌面壁纸，风景 (2560x1440)' }
+};
 
 const INITIAL_STATE: ProjectState = {
   projectName: '',
   step: AppStep.INPUT_SCRIPT,
   script: '',
-  style: { name: '', content: '', paintingStyle: '' },
+  style: { 
+    name: '', 
+    content: '', 
+    paintingStyle: '',
+    characterRatio: '9:16', // Default to 9:16
+    sceneRatio: '16:9',
+    shotRatio: '16:9'
+  },
   characters: [],
   scenes: [],
   shots: [],
@@ -188,7 +205,15 @@ export default function App() {
                 ...loadedData,
                 workspaceHandle: handle,
                 cozeApiKey: prev.cozeApiKey, // Prefer local key or handle key? Let's keep local key for auth
-                isAnalyzing: false
+                isAnalyzing: false,
+                // Ensure style object has default ratios if loading old project
+                style: {
+                    ...INITIAL_STATE.style,
+                    ...loadedData.style,
+                    characterRatio: loadedData.style?.characterRatio || '9:16', // Default to 9:16
+                    sceneRatio: loadedData.style?.sceneRatio || '16:9',
+                    shotRatio: loadedData.style?.shotRatio || '16:9'
+                }
             }));
             // If project loaded has no projectName, use folder name
             if (!loadedData.projectName) {
@@ -961,7 +986,7 @@ export default function App() {
       }
   };
 
-  const handleGenerateImage = async (type: 'character' | 'scene', id: string, model?: string) => {
+  const handleGenerateImage = async (type: 'character' | 'scene', id: string) => {
      setEntityLoading(type, id, 'isGeneratingImage', true);
 
      const entity = type === 'character' ? state.characters.find(c => c.id === id) : state.scenes.find(s => s.id === id);
@@ -971,6 +996,20 @@ export default function App() {
      }
 
      try {
+       // Look up dimensions based on selected ratio
+       let width = 2048, height = 2048;
+       if (type === 'character') {
+          const ratioKey = state.style.characterRatio || '9:16';
+          const dims = ASPECT_RATIOS[ratioKey as keyof typeof ASPECT_RATIOS] || ASPECT_RATIOS['9:16'];
+          width = dims.width;
+          height = dims.height;
+       } else {
+          const ratioKey = state.style.sceneRatio || '16:9';
+          const dims = ASPECT_RATIOS[ratioKey as keyof typeof ASPECT_RATIOS] || ASPECT_RATIOS['16:9'];
+          width = dims.width;
+          height = dims.height;
+       }
+
        let generatedImages: string[] = [];
        if (type === 'character') {
             generatedImages = await generateCharacterViews(
@@ -978,7 +1017,8 @@ export default function App() {
                 state.style, 
                 state.script, 
                 state.cozeApiKey,
-                model
+                width,
+                height
             );
             setState(prev => {
                 const list = prev.characters;
@@ -1008,7 +1048,13 @@ export default function App() {
             }
 
        } else {
-            const newImages = await generateVisualAsset(entity.visualPrompt, state.style, state.cozeApiKey, model);
+            const newImages = await generateVisualAsset(
+                entity.visualPrompt, 
+                state.style, 
+                state.cozeApiKey, 
+                width, 
+                height
+            );
             generatedImages = newImages;
             setState(prev => {
                 const list = prev.scenes;
@@ -1046,7 +1092,7 @@ export default function App() {
      }
   };
 
-  const handleGenerateShotImage = async (id: string, model?: string, referenceImageUrls?: string[]) => {
+  const handleGenerateShotImage = async (id: string, referenceImageUrls?: string[]) => {
       const shot = state.shots.find(s => s.id === id);
       if (!shot || !shot.visualPrompt) return;
 
@@ -1075,12 +1121,17 @@ export default function App() {
               finalPrompt += "。参考图：使用上传的参考图进行绘制";
           }
 
+          // Look up dimensions based on selected ratio for shots
+          const ratioKey = state.style.shotRatio || '16:9';
+          const dims = ASPECT_RATIOS[ratioKey as keyof typeof ASPECT_RATIOS] || ASPECT_RATIOS['16:9'];
+
           // Pass the file IDs to the generation service
           const images = await generateVisualAsset(
               finalPrompt, 
               state.style, 
               state.cozeApiKey, 
-              model, 
+              dims.width, 
+              dims.height, 
               undefined, // specificReferenceId (legacy, unused here)
               fileIds    // referenceFileIds
           );
@@ -1248,6 +1299,66 @@ export default function App() {
                         : 'border-slate-300'
                       } disabled:bg-slate-50 disabled:text-slate-400`}
                     />
+                  </div>
+              </div>
+
+              {/* Image Ratio Settings */}
+              <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                      <Maximize className="w-4 h-4 text-indigo-600" />
+                      图片比例设置
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      {/* Character Ratio */}
+                      <div>
+                          <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
+                              <Users className="w-3 h-3" />
+                              角色图比例
+                          </label>
+                          <select 
+                              value={state.style.characterRatio || '9:16'}
+                              onChange={(e) => setState(s => ({ ...s, style: { ...s.style, characterRatio: e.target.value } }))}
+                              className="w-full p-2 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                          >
+                              {Object.entries(ASPECT_RATIOS).map(([key, val]) => (
+                                  <option key={`char-${key}`} value={key}>{val.label}</option>
+                              ))}
+                          </select>
+                      </div>
+
+                      {/* Scene Ratio */}
+                      <div>
+                          <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
+                              <MapPin className="w-3 h-3" />
+                              场景图比例
+                          </label>
+                          <select 
+                              value={state.style.sceneRatio || '16:9'}
+                              onChange={(e) => setState(s => ({ ...s, style: { ...s.style, sceneRatio: e.target.value } }))}
+                              className="w-full p-2 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                          >
+                              {Object.entries(ASPECT_RATIOS).map(([key, val]) => (
+                                  <option key={`scene-${key}`} value={key}>{val.label}</option>
+                              ))}
+                          </select>
+                      </div>
+
+                      {/* Shot Ratio */}
+                      <div>
+                          <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
+                              <Film className="w-3 h-3" />
+                              分镜图比例
+                          </label>
+                          <select 
+                              value={state.style.shotRatio || '16:9'}
+                              onChange={(e) => setState(s => ({ ...s, style: { ...s.style, shotRatio: e.target.value } }))}
+                              className="w-full p-2 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                          >
+                              {Object.entries(ASPECT_RATIOS).map(([key, val]) => (
+                                  <option key={`shot-${key}`} value={key}>{val.label}</option>
+                              ))}
+                          </select>
+                      </div>
                   </div>
               </div>
 
@@ -1617,7 +1728,7 @@ export default function App() {
                     globalEntity={globalEntity} // Pass the found global entity
                     onUpdate={(id, field, value) => updateEntity(activeTab === 'characters' ? 'character' : 'scene', id, field, value)}
                     onGeneratePrompt={(id) => generateEntityPrompt(activeTab === 'characters' ? 'character' : 'scene', id)}
-                    onGenerateImage={(id, model) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id, model)}
+                    onGenerateImage={(id) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id)}
                     onShowDialog={showConfirm}
                     onPreviewImage={(url) => setPreviewImageUrl(url)}
                   />
@@ -1667,7 +1778,7 @@ export default function App() {
                 onEpisodeChange={(ep) => setSelectedEpisode(ep)}
                 onGenerate={handleGenerateStoryboard}
                 onUpdateShot={updateShot}
-                onGenerateImage={handleGenerateShotImage}
+                onGenerateImage={(id, refUrls) => handleGenerateShotImage(id, refUrls)}
                 onGeneratePrompt={() => {}} // Not auto-generating prompts separately for shots in this version
                 onPreviewImage={setPreviewImageUrl}
             />

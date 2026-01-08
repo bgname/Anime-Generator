@@ -16,7 +16,7 @@ interface StoryboardViewProps {
   onEpisodeChange: (episode: number) => void;
   onGenerate: (episode: number) => void;
   onUpdateShot: (id: string, field: string, value: any) => void;
-  onGenerateImage: (id: string, model?: string, referenceImageUrls?: string[]) => void;
+  onGenerateImage: (id: string, referenceImageUrls?: string[]) => void;
   onGeneratePrompt: (id: string) => void;
   onPreviewImage: (url: string) => void;
 }
@@ -35,7 +35,6 @@ export const StoryboardView: React.FC<StoryboardViewProps> = ({
   onPreviewImage
 }) => {
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
-  const [model, setModel] = useState('Doubao-Seedream-4.0');
   
   // Multi-select state for references
   const [selectedRefItems, setSelectedRefItems] = useState<{ url: string, name: string, type: 'character' | 'scene' }[]>([]);
@@ -51,25 +50,47 @@ export const StoryboardView: React.FC<StoryboardViewProps> = ({
   // Build Reference Lists (Memoized)
   const refCharacters = useMemo(() => {
       const isEp1 = selectedEpisode === 1;
-      return characters.filter(c => {
+      const candidates = characters.filter(c => {
           // Include global characters (no episode) only for Episode 1, OR characters specifically for this episode
           return c.episode === selectedEpisode || (isEp1 && !c.episode);
-      }).filter(c => c.images && c.images.length > 0).map(c => ({
-          url: c.images[0], // Use the selected/cover image
-          name: c.name,
-          type: 'character' as const
-      }));
+      }).filter(c => c.images && c.images.length > 0);
+
+      // Deduplicate by URL to avoid showing same image inherited from global
+      const unique = new Map();
+      candidates.forEach(c => {
+          const url = c.images[0];
+          if (!unique.has(url)) {
+              unique.set(url, {
+                  url: url,
+                  name: c.name,
+                  type: 'character' as const
+              });
+          }
+      });
+      
+      return Array.from(unique.values()) as { url: string, name: string, type: 'character' }[];
   }, [characters, selectedEpisode]);
 
   const refScenes = useMemo(() => {
       const isEp1 = selectedEpisode === 1;
-      return scenes.filter(s => {
+      const candidates = scenes.filter(s => {
           return s.episode === selectedEpisode || (isEp1 && !s.episode);
-      }).filter(s => s.images && s.images.length > 0).map(s => ({
-          url: s.images[0], // Use the selected/cover image
-          name: s.name,
-          type: 'scene' as const
-      }));
+      }).filter(s => s.images && s.images.length > 0);
+
+      // Deduplicate by URL
+      const unique = new Map();
+      candidates.forEach(s => {
+          const url = s.images[0];
+          if (!unique.has(url)) {
+              unique.set(url, {
+                  url: url,
+                  name: s.name,
+                  type: 'scene' as const
+              });
+          }
+      });
+
+      return Array.from(unique.values()) as { url: string, name: string, type: 'scene' }[];
   }, [scenes, selectedEpisode]);
 
   // Auto-select first shot
@@ -235,16 +256,8 @@ export const StoryboardView: React.FC<StoryboardViewProps> = ({
                          {/* Image Generation Toolbar */}
                          <div className="absolute bottom-4 left-0 right-0 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                              <div className="bg-white/90 backdrop-blur-sm p-1.5 rounded-full shadow-lg flex items-center gap-2">
-                                <select 
-                                    value={model} 
-                                    onChange={(e) => setModel(e.target.value)}
-                                    className="text-xs bg-transparent border-none focus:ring-0 text-slate-700 font-medium"
-                                >
-                                    <option value="Doubao-Seedream-4.0">Seedream 4.0</option>
-                                    <option value="Doubao-Seedream-3.0">Seedream 3.0</option>
-                                </select>
                                 <button 
-                                    onClick={() => onGenerateImage(currentShot.id, model, selectedRefItems.map(i => i.url))}
+                                    onClick={() => onGenerateImage(currentShot.id, selectedRefItems.map(i => i.url))}
                                     disabled={currentShot.isGeneratingImage}
                                     className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded-full font-bold flex items-center gap-1 transition-colors"
                                 >

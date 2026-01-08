@@ -5,6 +5,9 @@ export interface OverallStyle {
   paintingStyle: string;
   referenceImageId?: string;
   referenceImageName?: string;
+  characterRatio?: string;
+  sceneRatio?: string;
+  shotRatio?: string;
 }
 
 export interface Character {

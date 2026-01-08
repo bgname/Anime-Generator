@@ -867,7 +867,8 @@ export const generateVisualAsset = async (
   prompt: string,
   style: OverallStyle,
   apiKey: string,
-  model: string = 'Doubao-Seedream-4.0',
+  width: number = 2560,
+  height: number = 1440,
   specificReferenceId?: string,
   referenceFileIds?: string[]
 ): Promise<string[]> => {
@@ -875,7 +876,9 @@ export const generateVisualAsset = async (
      const params: any = {
         prompt: prompt,
         style_name: style.name,
-        model: model
+        model: 'Doubao-Seedream-4.0',
+        width: width,
+        height: height
      };
      
      // Support multiple reference images
@@ -904,13 +907,16 @@ export const generateCharacterViews = async (
   style: OverallStyle,
   script: string,
   apiKey: string,
-  model: string = 'Doubao-Seedream-4.0'
+  width: number = 2048,
+  height: number = 2048
 ): Promise<string[]> => {
     try {
      const params: any = {
         prompt: prompt,
         style_name: style.name,
-        model: model
+        model: 'Doubao-Seedream-4.0',
+        width: width,
+        height: height
      };
      if (style.referenceImageId) {
         params.reference_image_id = style.referenceImageId;
