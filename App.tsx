@@ -22,7 +22,8 @@ import {
   splitScriptToEpisodes,
   extractEpisodeEntities,
   extractEpisodeScenes,
-  extractEpisodeStoryboard
+  extractEpisodeStoryboard,
+  analyzeImageStyle
 } from './services/geminiService';
 import { 
   createNewProject, 
@@ -95,7 +96,17 @@ export default function App() {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  
+  // Preview State
+  const [previewState, setPreviewState] = useState<{
+    isOpen: boolean;
+    images: string[];
+    initialIndex: number;
+  }>({
+    isOpen: false,
+    images: [],
+    initialIndex: 0
+  });
 
   // Loading state for project operations
   const [isProjectLoading, setIsProjectLoading] = useState(false);
@@ -161,7 +172,21 @@ export default function App() {
     state.storyboardStatus
   ]);
 
-  // --- Project Management Handlers ---
+  // --- Handlers ---
+
+  const handlePreviewImage = (url: string, contextImages: string[] = []) => {
+      let images = contextImages;
+      if (!images || images.length === 0) {
+          images = [url];
+      }
+      
+      const index = images.indexOf(url);
+      setPreviewState({
+          isOpen: true,
+          images: images,
+          initialIndex: index !== -1 ? index : 0
+      });
+  };
 
   const handleCreateProject = async (name: string) => {
     setIsProjectLoading(true);
@@ -1010,76 +1035,95 @@ export default function App() {
           height = dims.height;
        }
 
-       let generatedImages: string[] = [];
-       if (type === 'character') {
-            generatedImages = await generateCharacterViews(
-                entity.visualPrompt, 
-                state.style, 
-                state.script, 
-                state.cozeApiKey,
-                width,
-                height
-            );
-            setState(prev => {
-                const list = prev.characters;
-                const updatedList = list.map(item => {
-                    if (item.id === id) {
-                        return {
-                            ...item,
-                            // Append new image to existing array (Gallery style)
-                            images: [...(item.images || []), ...generatedImages],
-                            isGeneratingImage: false
-                        };
-                    }
-                    return item;
-                });
-                return { ...prev, characters: updatedList };
-            });
+       // --- HANDLE REFERENCE IMAGE ---
+       let refImageId: string | undefined = undefined;
+       
+       if (entity.selectedReferenceImage) {
+           try {
+               // Must upload to Coze to use as reference
+               const uploadRes = await uploadImageFromUrl(entity.selectedReferenceImage, state.cozeApiKey);
+               refImageId = uploadRes.id;
+               console.log("Uploaded reference image", refImageId);
+           } catch (e) {
+               console.error("Reference image upload failed, proceeding without reference", e);
+               showAlert("参考图上传失败，本次生成将不使用参考图。");
+           }
+       }
 
-            // Save Character Images
-            if (state.workspaceHandle) {
-                const startIdx = (entity.images || []).length;
-                for (let i = 0; i < generatedImages.length; i++) {
-                    const img = generatedImages[i];
-                    if (img) {
-                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `image_${startIdx + i + 1}.png`, img);
-                    }
-                }
-            }
 
-       } else {
-            const newImages = await generateVisualAsset(
-                entity.visualPrompt, 
-                state.style, 
-                state.cozeApiKey, 
-                width, 
-                height
-            );
-            generatedImages = newImages;
-            setState(prev => {
-                const list = prev.scenes;
-                const updatedList = list.map(item => {
-                    if (item.id === id) {
-                        return {
-                            ...item,
-                            images: [...(item.images || []), ...newImages],
-                            isGeneratingImage: false
-                        };
-                    }
-                    return item;
-                });
-                return { ...prev, scenes: updatedList };
-            });
+       // --- BATCH GENERATION LOGIC ---
+       const BATCH_COUNT = 4;
+       
+       const generateTask = async () => {
+           if (type === 'character') {
+                return await generateCharacterViews(
+                    entity.visualPrompt, 
+                    state.style, 
+                    state.script, 
+                    state.cozeApiKey,
+                    width,
+                    height,
+                    refImageId // Pass specific reference ID
+                );
+           } else {
+                return await generateVisualAsset(
+                    entity.visualPrompt, 
+                    state.style, 
+                    state.cozeApiKey, 
+                    width, 
+                    height,
+                    refImageId // Pass specific reference ID (maps to legacy or fileIds internally)
+                );
+           }
+       };
 
-            // Save Scene Images
-            if (state.workspaceHandle) {
-                const startIdx = (entity.images || []).length;
-                for (let i = 0; i < newImages.length; i++) {
-                     const img = newImages[i];
-                     if(img) {
-                        await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `image_${startIdx + i + 1}.png`, img);
-                     }
-                }
+       // Run concurrent requests
+       const results = await Promise.all(
+          Array.from({ length: BATCH_COUNT }).map(() => 
+              generateTask().catch(e => {
+                  console.warn("Single batch image generation failed", e);
+                  return [] as string[];
+              })
+          )
+       );
+
+       const generatedImages = results.flat().filter(url => !!url);
+
+       if (generatedImages.length === 0) {
+           throw new Error("Failed to generate any images in the batch.");
+       }
+
+       // Update State
+       setState(prev => {
+           if (type === 'character') {
+               return {
+                   ...prev,
+                   characters: prev.characters.map(item => item.id === id ? {
+                       ...item,
+                       images: [...(item.images || []), ...generatedImages],
+                       isGeneratingImage: false
+                   } : item)
+               };
+           } else {
+               return {
+                   ...prev,
+                   scenes: prev.scenes.map(item => item.id === id ? {
+                       ...item,
+                       images: [...(item.images || []), ...generatedImages],
+                       isGeneratingImage: false
+                   } : item)
+               };
+           }
+       });
+
+       // Save Images
+       if (state.workspaceHandle) {
+            const startIdx = (entity.images || []).length;
+            for (let i = 0; i < generatedImages.length; i++) {
+                 const img = generatedImages[i];
+                 if(img) {
+                    await saveEntityAsset(state.workspaceHandle, type, entity.name, id, `image_${startIdx + i + 1}.png`, img);
+                 }
             }
        }
 
@@ -1159,10 +1203,18 @@ export default function App() {
       return;
     }
 
+    // Set loading state
     setState(prev => ({ ...prev, isAnalyzing: true }));
-    setLoadingMessage("正在上传参考图片...");
+    setLoadingMessage("正在上传并分析参考图风格...");
+
     try {
+        // 1. Upload File
         const result = await uploadFileToCoze(file, state.cozeApiKey);
+        
+        // 2. Analyze Style using the new workflow
+        const analyzedStyle = await analyzeImageStyle(result.id, state.cozeApiKey);
+
+        // 3. Update State
         setState(prev => ({
             ...prev,
             isAnalyzing: false,
@@ -1170,12 +1222,13 @@ export default function App() {
                 ...prev.style,
                 referenceImageId: result.id,
                 referenceImageName: result.name,
-                paintingStyle: '' // Mutually exclusive: clear painting style
+                // Overwrite paintingStyle with analysis result, or keep existing if analysis failed (though we expect it to return something)
+                paintingStyle: analyzedStyle || prev.style.paintingStyle 
             }
         }));
     } catch (error) {
-        console.error("File upload failed", error);
-        showAlert("参考图上传失败，请稍后重试。");
+        console.error("File upload/analysis failed", error);
+        showAlert("参考图上传或风格分析失败，请稍后重试。");
         setState(prev => ({ ...prev, isAnalyzing: false }));
     } finally {
         setLoadingMessage("");
@@ -1284,20 +1337,22 @@ export default function App() {
                           画风 (Painting Style) <span className="text-red-500">*</span>
                       </span>
                       {state.style.referenceImageId && (
-                          <span className="text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-100">已使用参考图</span>
+                          <span className="text-[10px] text-green-600 bg-green-50 px-1.5 py-0.5 rounded border border-green-100 flex items-center gap-1">
+                             <CheckCircle2 className="w-3 h-3" /> 已从参考图提取
+                          </span>
                       )}
                     </label>
                     <input
                       type="text"
                       value={state.style.paintingStyle}
-                      disabled={!!state.style.referenceImageId}
+                      // Removed disabled prop
                       onChange={(e) => setState(s => ({ ...s, style: { ...s.style, paintingStyle: e.target.value } }))}
-                      placeholder={state.style.referenceImageId ? "已锁定，若要修改请先删除下方参考图" : "例如：赛博朋克、水彩、写实..."}
+                      placeholder="例如：赛博朋克、水彩、写实..."
                       className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-lg text-slate-800 transition-all ${
                         !isStyleConfigured && !state.style.referenceImageId 
                         ? 'border-amber-300 bg-amber-50/20' 
                         : 'border-slate-300'
-                      } disabled:bg-slate-50 disabled:text-slate-400`}
+                      }`}
                     />
                   </div>
               </div>
@@ -1372,7 +1427,7 @@ export default function App() {
                           <Upload className="w-4 h-4 text-indigo-600" />
                           风格参考图 (Reference Image) <span className="text-red-500">*</span>
                       </label>
-                      <span className="text-xs text-slate-400 italic">* 上传后将替代“画风”文本描述生效</span>
+                      <span className="text-xs text-slate-400 italic">* 上传后将分析并自动填写画风描述</span>
                   </div>
                   
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
@@ -1730,7 +1785,7 @@ export default function App() {
                     onGeneratePrompt={(id) => generateEntityPrompt(activeTab === 'characters' ? 'character' : 'scene', id)}
                     onGenerateImage={(id) => handleGenerateImage(activeTab === 'characters' ? 'character' : 'scene', id)}
                     onShowDialog={showConfirm}
-                    onPreviewImage={(url) => setPreviewImageUrl(url)}
+                    onPreviewImage={handlePreviewImage}
                   />
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
@@ -1780,7 +1835,7 @@ export default function App() {
                 onUpdateShot={updateShot}
                 onGenerateImage={(id, refUrls) => handleGenerateShotImage(id, refUrls)}
                 onGeneratePrompt={() => {}} // Not auto-generating prompts separately for shots in this version
-                onPreviewImage={setPreviewImageUrl}
+                onPreviewImage={(url) => handlePreviewImage(url)}
             />
         </div>
     );
@@ -1881,13 +1936,14 @@ export default function App() {
            history={state.history}
            workspaceHandle={state.workspaceHandle}
            onDelete={handleDeleteHistory}
-           onPreviewImage={setPreviewImageUrl}
+           onPreviewImage={handlePreviewImage}
         />
 
         <ImagePreviewModal 
-          isOpen={!!previewImageUrl}
-          imageUrl={previewImageUrl || ''}
-          onClose={() => setPreviewImageUrl(null)}
+          isOpen={previewState.isOpen}
+          images={previewState.images}
+          initialIndex={previewState.initialIndex}
+          onClose={() => setPreviewState(prev => ({ ...prev, isOpen: false }))}
         />
       </div>
 
@@ -1900,4 +1956,24 @@ export default function App() {
       )}
     </div>
   );
+}
+// @ts-ignore
+function CheckCircle2(props: any) {
+  return (
+    <svg
+      {...props}
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  )
 }

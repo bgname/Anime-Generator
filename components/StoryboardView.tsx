@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { Shot, Character, Scene } from '../types';
 import { 
@@ -18,7 +17,7 @@ interface StoryboardViewProps {
   onUpdateShot: (id: string, field: string, value: any) => void;
   onGenerateImage: (id: string, referenceImageUrls?: string[]) => void;
   onGeneratePrompt: (id: string) => void;
-  onPreviewImage: (url: string) => void;
+  onPreviewImage: (url: string, allImages?: string[]) => void;
 }
 
 export const StoryboardView: React.FC<StoryboardViewProps> = ({

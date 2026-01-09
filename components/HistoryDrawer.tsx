@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { GenerationHistoryItem } from '../types';
 import { X, Download, Clock, Image as ImageIcon, Check, FolderOpen, Trash2 } from 'lucide-react';
@@ -11,7 +10,7 @@ interface HistoryDrawerProps {
   history: GenerationHistoryItem[];
   workspaceHandle?: any;
   onDelete: (id: string) => void;
-  onPreviewImage: (url: string) => void;
+  onPreviewImage: (url: string, allImages?: string[]) => void;
 }
 
 export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ 
@@ -119,7 +118,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
                                     <div 
                                       key={idx} 
                                       className="aspect-square bg-slate-100 rounded overflow-hidden border border-slate-200 cursor-pointer hover:opacity-80 transition-opacity"
-                                      onClick={() => img && onPreviewImage(img)}
+                                      onClick={() => img && onPreviewImage(img, item.images)}
                                     >
                                         {img ? (
                                             <img src={img} className="w-full h-full object-cover" alt="gen" />

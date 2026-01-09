@@ -21,6 +21,7 @@ export interface Character {
   isGeneratingImage?: boolean;
   isGeneratingPrompt?: boolean;
   episode?: number; // Added episode number
+  selectedReferenceImage?: string; // Selected image URL for reference generation
 }
 
 export interface Scene {
@@ -33,6 +34,7 @@ export interface Scene {
   isGeneratingImage?: boolean;
   isGeneratingPrompt?: boolean;
   episode?: number; // Added episode number
+  selectedReferenceImage?: string; // Selected image URL for reference generation
 }
 
 // Added EpisodeInfo interface to fix the import error in EpisodeInfoCard.tsx

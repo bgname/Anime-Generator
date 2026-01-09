@@ -19,6 +19,7 @@ const COZE_WORKFLOW_ID_SPLIT_EPISODES = '7587359364898947124';
 const COZE_WORKFLOW_ID_EXTRACT_EPISODE_ENTITIES = '7587626459273068553';
 const COZE_WORKFLOW_ID_EXTRACT_EPISODE_SCENES = '7587731183036792868';
 const COZE_WORKFLOW_ID_EXTRACT_STORYBOARD = '7587239418848346138'; // Updated ID
+const COZE_WORKFLOW_ID_IMAGE_STYLE_ANALYSIS = '7592919872955400192'; // New Image Analysis ID
 
 export const uploadFileToCoze = async (file: File, apiKey: string): Promise<{ id: string, name: string }> => {
   const formData = new FormData();
@@ -310,6 +311,33 @@ function safeJsonParse(input: string): any {
         throw e;
     }
 }
+
+export const analyzeImageStyle = async (fileId: string, apiKey: string): Promise<string> => {
+    try {
+        const result = await runCozeWorkflow(COZE_WORKFLOW_ID_IMAGE_STYLE_ANALYSIS, {
+            image: JSON.stringify({ file_id: fileId })
+        }, apiKey);
+
+        let paintingStyle = "";
+        try {
+            const parsed = safeJsonParse(result);
+            if (parsed && parsed.painting_style) {
+                paintingStyle = parsed.painting_style;
+            } else {
+                // Fallback attempt to extract if output is mixed
+                if (typeof result === 'string') {
+                    const match = result.match(/"painting_style"\s*:\s*"([^"]+)"/);
+                    if (match) paintingStyle = match[1];
+                }
+            }
+        } catch(e) {}
+
+        return paintingStyle;
+    } catch (error) {
+        console.error("Analyze Image Style Error", error);
+        throw error;
+    }
+};
 
 export const splitScriptToEpisodes = async (script: string, apiKey: string): Promise<string[]> => {
     try {
@@ -881,17 +909,19 @@ export const generateVisualAsset = async (
         height: height
      };
      
-     // Support multiple reference images
+     // Support multiple reference images or single fallback
+     const idsToUse: string[] = [];
      if (referenceFileIds && referenceFileIds.length > 0) {
-        params.reference_images = referenceFileIds.map(id => JSON.stringify({ file_id: id }));
-     } 
-     // Support legacy/single reference override
-     else if (specificReferenceId) {
-        params.reference_image_id = specificReferenceId;
-     } 
-     // Fallback to global style reference
-     else if (style.referenceImageId) {
-        params.reference_image_id = style.referenceImageId;
+        idsToUse.push(...referenceFileIds);
+     } else if (specificReferenceId) {
+        idsToUse.push(specificReferenceId);
+     } else if (style.referenceImageId) {
+        idsToUse.push(style.referenceImageId);
+     }
+
+     if (idsToUse.length > 0) {
+        // User specified format: reference_images: ["{\"file_id\":\"...\"}"]
+        params.reference_images = idsToUse.map(id => JSON.stringify({ file_id: id }));
      }
 
      const result = await runCozeWorkflow(COZE_WORKFLOW_ID_SCENE_IMAGE_GEN, params, apiKey);
@@ -908,7 +938,8 @@ export const generateCharacterViews = async (
   script: string,
   apiKey: string,
   width: number = 2048,
-  height: number = 2048
+  height: number = 2048,
+  specificReferenceId?: string
 ): Promise<string[]> => {
     try {
      const params: any = {
@@ -918,8 +949,16 @@ export const generateCharacterViews = async (
         width: width,
         height: height
      };
-     if (style.referenceImageId) {
-        params.reference_image_id = style.referenceImageId;
+     
+     const idsToUse: string[] = [];
+     if (specificReferenceId) {
+        idsToUse.push(specificReferenceId);
+     } else if (style.referenceImageId) {
+        idsToUse.push(style.referenceImageId);
+     }
+     
+     if (idsToUse.length > 0) {
+        params.reference_images = idsToUse.map(id => JSON.stringify({ file_id: id }));
      }
      
      const result = await runCozeWorkflow(COZE_WORKFLOW_ID_CHARACTER_IMAGE_GEN, params, apiKey);
