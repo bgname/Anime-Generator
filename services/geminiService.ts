@@ -18,7 +18,7 @@ const COZE_WORKFLOW_ID_SCENE_IMAGE_GEN = '7586599921504010283';
 const COZE_WORKFLOW_ID_SPLIT_EPISODES = '7587359364898947124';
 const COZE_WORKFLOW_ID_EXTRACT_EPISODE_ENTITIES = '7587626459273068553';
 const COZE_WORKFLOW_ID_EXTRACT_EPISODE_SCENES = '7587731183036792868';
-const COZE_WORKFLOW_ID_EXTRACT_STORYBOARD = '7587239418848346138'; // Updated ID
+const COZE_WORKFLOW_ID_EXTRACT_STORYBOARD = '7592086335919669257'; // Updated ID
 const COZE_WORKFLOW_ID_IMAGE_STYLE_ANALYSIS = '7592919872955400192'; // New Image Analysis ID
 
 export const uploadFileToCoze = async (file: File, apiKey: string): Promise<{ id: string, name: string }> => {
@@ -120,9 +120,25 @@ async function runCozeWorkflow(workflowId: string, parameters: Record<string, an
           if (!dataStr) return;
           
           const data = JSON.parse(dataStr);
-          // Check for the End node content
-          if (data.node_type === 'End' && data.content) {
+          // Check for the End node content (allow node_type 'End' or node_title 'End' or event type 'WorkflowFinished')
+          // Sometimes the node is named 'End' but type might differ, or vice versa.
+          // Also, Coze sometimes returns the result in 'data' field of 'WorkflowFinished' event.
+          
+          if ((data.node_type === 'End' || data.node_title === 'End') && data.content) {
             contentJsonString = data.content;
+          } else if (data.event === 'WorkflowFinished' && data.data) {
+             // Fallback: sometimes data is in data.data for finished event, though structure varies.
+             // Usually data.data is a stringified JSON if it's the output.
+             // We prioritize explicit node content if found, but keep this as backup.
+             if (!contentJsonString) {
+                 try {
+                     const finishedData = JSON.parse(data.data);
+                     if (finishedData.output) contentJsonString = finishedData.output;
+                     else contentJsonString = data.data;
+                 } catch(e) {
+                     contentJsonString = data.data;
+                 }
+             }
           }
         } catch (e) {
           // Ignore parse errors
@@ -401,7 +417,11 @@ export const extractEpisodeScenes = async (
         // Secondary parse for nested string content
         try {
             if (targetString !== result || typeof targetString === 'string') {
-                 const scenesArray = safeJsonParse(targetString);
+                 // Remove Markdown wrappers if present before parsing
+                 let inner = targetString.trim();
+                 inner = inner.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+                 
+                 const scenesArray = safeJsonParse(inner);
                  if (Array.isArray(scenesArray)) {
                     scenesArray.forEach((item: any) => scenes.push(mapToScene(item)));
                  }
@@ -459,7 +479,11 @@ export const extractEpisodeEntities = async (
         }
 
         try {
-            const rolesArray = safeJsonParse(targetString);
+            // Remove Markdown wrappers if present before parsing
+            let inner = targetString.trim();
+            inner = inner.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
+            const rolesArray = safeJsonParse(inner);
             if (Array.isArray(rolesArray)) {
                 rolesArray.forEach((item: any) => {
                     characters.push(mapToCharacter(item));
@@ -505,7 +529,10 @@ export const extractEpisodeStoryboard = async (
 
         // 2. Handle nested stringified JSON
         if (typeof dataToParse === 'string') {
-            const trimmed = dataToParse.trim();
+            let trimmed = dataToParse.trim();
+            // Critical Fix: Remove markdown wrapping from the inner string if present
+            trimmed = trimmed.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
             if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
                 try {
                     const nestedParse = safeJsonParse(trimmed);
@@ -540,7 +567,11 @@ export const extractEpisodeStoryboard = async (
                 const desc = item.画面描述 || item.description || '';
 
                 // Append Style to Visual Prompt
-                const visualPrompt = `画面内容：${desc}。构图：${compStr}。运镜：${moveStr}${styleSuffix}`;
+                let visualPrompt = item.AI绘画提示词 || item.visual_prompt || item.prompt || item.提示词;
+
+                if (!visualPrompt) {
+                     visualPrompt = `画面内容：${desc}。构图：${compStr}。运镜：${moveStr}${styleSuffix}`;
+                }
 
                 shots.push({
                     shotNumber: shotIndex,
@@ -752,7 +783,11 @@ export const extractGlobalCharactersFromScript = async (
                  else if (charData.output) targetString = typeof charData.output === 'string' ? charData.output : JSON.stringify(charData.output);
             }
             
-            const rolesArray = safeJsonParse(targetString);
+            // Remove Markdown wrappers if present before parsing
+            let inner = targetString.trim();
+            inner = inner.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
+            const rolesArray = safeJsonParse(inner);
             if (Array.isArray(rolesArray)) {
                 rolesArray.forEach((item: any) => characters.push(mapToCharacter(item)));
             }
@@ -798,7 +833,11 @@ export const extractGlobalScenesFromScript = async (
                  else if (sceneData.output) targetString = typeof sceneData.output === 'string' ? sceneData.output : JSON.stringify(sceneData.output);
             }
 
-            const scenesArray = safeJsonParse(targetString);
+            // Remove Markdown wrappers if present before parsing
+            let inner = targetString.trim();
+            inner = inner.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
+            const scenesArray = safeJsonParse(inner);
             if (Array.isArray(scenesArray)) {
                  scenesArray.forEach((item: any) => scenes.push(mapToScene(item)));
             }
